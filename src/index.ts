@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
-import { Server, Socket } from 'socket.io';
+import { Server } from 'socket.io';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
 import dotenv from 'dotenv';
@@ -11,7 +11,23 @@ dotenv.config();
 // In production (VPC), this will use the service account from env or metadata server
 if (!admin.apps.length) {
   try {
-    admin.initializeApp();
+    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+    let serviceAccount: any = null;
+    if (serviceAccountRaw) {
+      try {
+        serviceAccount = JSON.parse(serviceAccountRaw);
+      } catch (parseError) {
+        console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
+      }
+    }
+    if (serviceAccount) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: process.env.FIREBASE_PROJECT_ID,
+      });
+    } else {
+      admin.initializeApp();
+    }
     console.log('🔥 Firebase Admin initialized');
   } catch (error) {
     console.error('Firebase Admin init failed:', error);
@@ -43,6 +59,29 @@ interface SessionData {
     output: string; // Buffer last output
 }
 const sessions = new Map<string, SessionData>();
+
+const endSession = (sessionId: string, reason: string) => {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  sessions.delete(sessionId);
+  io.to(sessionId).emit('session-ended', { sessionId, reason });
+};
+
+const endSessionsByOwner = (ownerUid: string, reason: string) => {
+  for (const [sessionId, session] of sessions.entries()) {
+    if (session.ownerUid === ownerUid) {
+      endSession(sessionId, reason);
+    }
+  }
+};
+
+const endSessionsByWorker = (workerSocketId: string, reason: string) => {
+  for (const [sessionId, session] of sessions.entries()) {
+    if (session.workerSocketId === workerSocketId) {
+      endSession(sessionId, reason);
+    }
+  }
+};
 
 // Middleware: Authentication
 io.use(async (socket, next) => {
@@ -108,6 +147,7 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
       userWorkers.delete(uid);
+      endSessionsByWorker(socket.id, 'worker-disconnected');
       io.to(`user:${uid}`).emit('worker-status', { status: 'offline' });
       console.log(`❌ Worker disconnected for User ${uid}`);
     });
@@ -115,6 +155,8 @@ io.on('connection', (socket) => {
     socket.on('output', (payload: { sessionId: string; output: string }) => {
         // Forward output to the specific session room
         // Normalize payload for client: Client expects { sessionId, data }
+        const session = sessions.get(payload.sessionId);
+        if (!session || session.workerSocketId !== socket.id) return;
         io.to(payload.sessionId).emit('output', {
             sessionId: payload.sessionId,
             data: payload.output
@@ -135,6 +177,8 @@ io.on('connection', (socket) => {
         if (!workerId) {
             return socket.emit('error', 'No worker available');
         }
+
+        endSessionsByOwner(uid, 'replaced');
 
         const sessionId = `sess_${uid}_${Date.now()}`;
         sessions.set(sessionId, {
@@ -175,10 +219,33 @@ io.on('connection', (socket) => {
             rows: data.rows
         });
     });
+
+    socket.on('disconnect', () => {
+        endSessionsByOwner(uid, 'client-disconnected');
+    });
   }
 });
 
-const PORT = parseInt(process.env.PORT || '3002');
+const resolvePort = () => {
+  if (process.env.PORT) {
+    return parseInt(process.env.PORT, 10);
+  }
+  const fallbackUrl = process.env.NEXUS_URL || process.env.NEXT_PUBLIC_NEXUS_URL;
+  if (fallbackUrl) {
+    try {
+      const parsed = new URL(fallbackUrl);
+      if (parsed.port) {
+        return parseInt(parsed.port, 10);
+      }
+      return parsed.protocol === 'https:' ? 443 : 80;
+    } catch (error) {
+      console.warn('Invalid NEXUS_URL, using default port');
+    }
+  }
+  return 3002;
+};
+
+const PORT = resolvePort();
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Hub Service running on port ${PORT}`);
 });
