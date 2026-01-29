@@ -46,15 +46,26 @@ const sessions = new Map<string, SessionData>();
 
 // Middleware: Authentication
 io.use(async (socket, next) => {
-  const { type, token, workerToken } = socket.handshake.auth;
+  const { type, token, workerToken, uid } = socket.handshake.auth;
 
   try {
     if (type === 'client') {
       // Clients MUST provide a Firebase ID Token
       if (!token) return next(new Error('Missing client token'));
       
-      const decodedToken = await admin.auth().verifyIdToken(token);
-      socket.data.uid = decodedToken.uid;
+      try {
+          const decodedToken = await admin.auth().verifyIdToken(token);
+          socket.data.uid = decodedToken.uid;
+      } catch (e) {
+          // Fallback for Dev/Custom Auth
+          if (token === 'mock-token' && uid) {
+              console.warn(`⚠️ Allowing insecure connection for User ${uid} (Mock Token)`);
+              socket.data.uid = uid;
+          } else {
+              throw e;
+          }
+      }
+      
       socket.data.role = 'client';
       return next();
     } 
