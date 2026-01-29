@@ -189,11 +189,8 @@ io.on('connection', (socket) => {
 
         socket.join(sessionId); // Client joins session room
 
-        // Tell worker to spawn a shell
-        io.to(workerId).emit('execute', { 
-            sessionId, 
-            command: '' // Empty command triggers spawn
-        });
+        // Tell worker to spawn a PTY shell
+        io.to(workerId).emit('session-created', { id: sessionId });
 
         socket.emit('session-created', { id: sessionId });
     });
