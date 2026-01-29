@@ -152,14 +152,14 @@ io.on('connection', (socket) => {
       console.log(`❌ Worker disconnected for User ${uid}`);
     });
 
-    socket.on('output', (payload: { sessionId: string; output: string }) => {
+    socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
         // Forward output to the specific session room
         // Normalize payload for client: Client expects { sessionId, data }
         const session = sessions.get(payload.sessionId);
         if (!session || session.workerSocketId !== socket.id) return;
         io.to(payload.sessionId).emit('output', {
             sessionId: payload.sessionId,
-            data: payload.output
+            data: payload.output || payload.data || ''
         });
     });
   }
