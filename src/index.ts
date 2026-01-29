@@ -112,9 +112,13 @@ io.on('connection', (socket) => {
       console.log(`❌ Worker disconnected for User ${uid}`);
     });
 
-    socket.on('output', (data: { sessionId: string; data: string }) => {
-        // Forward output to the specific session room (which the client joined)
-        io.to(data.sessionId).emit('output', data);
+    socket.on('output', (payload: { sessionId: string; output: string }) => {
+        // Forward output to the specific session room
+        // Normalize payload for client: Client expects { sessionId, data }
+        io.to(payload.sessionId).emit('output', {
+            sessionId: payload.sessionId,
+            data: payload.output
+        });
     });
   }
 
