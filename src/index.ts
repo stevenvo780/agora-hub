@@ -1,5 +1,7 @@
 import express from 'express';
 import { createServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import { readFileSync, existsSync } from 'fs';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
@@ -35,12 +37,31 @@ if (!admin.apps.length) {
 }
 
 const app = express();
-const httpServer = createServer(app);
 
-// Allow connections from your Next.js frontend
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:3000';
-
 app.use(cors({ origin: CLIENT_ORIGIN }));
+
+let httpServer;
+const sslKeyPath = process.env.SSL_KEY_PATH;
+const sslCertPath = process.env.SSL_CERT_PATH;
+
+if (sslKeyPath && sslCertPath && existsSync(sslKeyPath) && existsSync(sslCertPath)) {
+  console.log('🔒 Initializing secure HTTPS server...');
+  try {
+    const httpsOptions = {
+        key: readFileSync(sslKeyPath),
+        cert: readFileSync(sslCertPath),
+    };
+    httpServer = createHttpsServer(httpsOptions, app);
+    console.log('✅ HTTPS Server Created');
+  } catch (e) {
+    console.error('❌ Failed to create SSL server, falling back to HTTP', e);
+    httpServer = createServer(app);
+  }
+} else {
+  console.log('⚠️ No SSL keys found, initializing insecure HTTP server...');
+  httpServer = createServer(app);
+}
 
 const io = new Server(httpServer, {
   cors: {
