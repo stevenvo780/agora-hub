@@ -14,10 +14,10 @@ dotenv.config();
 if (!admin.apps.length) {
   try {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-    let serviceAccount: any = null;
+    let serviceAccount: admin.ServiceAccount | null = null;
     if (serviceAccountRaw) {
       try {
-        serviceAccount = JSON.parse(serviceAccountRaw);
+        serviceAccount = JSON.parse(serviceAccountRaw) as admin.ServiceAccount;
       } catch (parseError) {
         console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
       }
