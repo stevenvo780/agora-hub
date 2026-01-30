@@ -78,6 +78,9 @@ interface SessionData {
     ownerUid: string;
     workerSocketId: string;
     output: string; // Buffer last output
+    workspaceId?: string;
+    workspaceName?: string;
+    workspaceType?: string;
 }
 const sessions = new Map<string, SessionData>();
 
@@ -193,7 +196,7 @@ io.on('connection', (socket) => {
     const workerSocketId = userWorkers.get(uid);
     socket.emit('worker-status', { status: workerSocketId ? 'online' : 'offline' });
 
-    socket.on('create-session', () => {
+    socket.on('create-session', (payload?: { workspaceId?: string; workspaceName?: string; workspaceType?: string }) => {
         const workerId = userWorkers.get(uid);
         if (!workerId) {
             return socket.emit('error', 'No worker available');
@@ -201,17 +204,29 @@ io.on('connection', (socket) => {
 
         endSessionsByOwner(uid, 'replaced');
 
+        const workspaceId = typeof payload?.workspaceId === 'string' ? payload.workspaceId : undefined;
+        const workspaceName = typeof payload?.workspaceName === 'string' ? payload.workspaceName : undefined;
+        const workspaceType = typeof payload?.workspaceType === 'string' ? payload.workspaceType : undefined;
+
         const sessionId = `sess_${uid}_${Date.now()}`;
         sessions.set(sessionId, {
             ownerUid: uid,
             workerSocketId: workerId,
-            output: ''
+            output: '',
+            workspaceId,
+            workspaceName,
+            workspaceType
         });
 
         socket.join(sessionId); // Client joins session room
 
         // Tell worker to spawn a PTY shell
-        io.to(workerId).emit('session-created', { id: sessionId });
+        io.to(workerId).emit('session-created', {
+            id: sessionId,
+            workspaceId,
+            workspaceName,
+            workspaceType
+        });
 
         socket.emit('session-created', { id: sessionId });
     });
