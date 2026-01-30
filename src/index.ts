@@ -209,15 +209,19 @@ io.on('connection', (socket) => {
     socket.join(`user:${uid}`);
 
     // Check if they have a worker online
-    // Logic: Return status for ALL known workspaces? Or a 'personal' default?
-    // Client will query specific status if needed, but for now we send 'online' if ANY worker is online
-    // or we can iterate and send status for all.
-    const userMap = userWorkers.get(uid);
-    if (userMap) {
-        userMap.forEach((_, wsId) => {
-            socket.emit('worker-status', { status: 'online', workspaceId: wsId });
-        });
-    }
+    // Small delay to ensure client has registered its listeners
+    setTimeout(() => {
+      const userMap = userWorkers.get(uid);
+      console.log(`[Hub] Sending initial status to client ${uid}, workers:`, userMap ? Array.from(userMap.keys()) : 'none');
+      if (userMap) {
+          userMap.forEach((_, wsId) => {
+              console.log(`[Hub] Sending worker-status online for workspace: ${wsId}`);
+              socket.emit('worker-status', { status: 'online', workspaceId: wsId });
+          });
+      } else {
+          console.log(`[Hub] No workers found for user ${uid}`);
+      }
+    }, 100);
 
     socket.on('create-session', (payload?: { workspaceId?: string; workspaceName?: string; workspaceType?: string }) => {
         console.log(`[Hub] create-session request from ${uid}`, payload);
