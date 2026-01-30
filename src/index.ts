@@ -70,8 +70,8 @@ const io = new Server(httpServer, {
   }
 });
 
-// Store active workers: Map<OwnerUID, SocketID>
-const userWorkers = new Map<string, string>();
+// Store active workers: Map<OwnerUID, Map<WorkspaceId, SocketID>>
+const userWorkers = new Map<string, Map<string, string>>();
 
 // Store active sessions: Map<SessionID, SessionData>
 interface SessionData {
@@ -91,10 +91,11 @@ const endSession = (sessionId: string, reason: string) => {
   io.to(sessionId).emit('session-ended', { sessionId, reason });
 };
 
-const endSessionsByOwner = (ownerUid: string, reason: string) => {
+const endSessionsByOwner = (ownerUid: string, reason: string, specificWorkspaceId?: string) => {
   for (const [sessionId, session] of sessions.entries()) {
     if (session.ownerUid === ownerUid) {
-      endSession(sessionId, reason);
+        if (specificWorkspaceId && session.workspaceId !== specificWorkspaceId) continue;
+        endSession(sessionId, reason);
     }
   }
 };
@@ -109,7 +110,7 @@ const endSessionsByWorker = (workerSocketId: string, reason: string) => {
 
 // Middleware: Authentication
 io.use(async (socket, next) => {
-  const { type, token, workerToken, uid } = socket.handshake.auth;
+  const { type, token, workerToken, uid, workspaceId } = socket.handshake.auth;
 
   try {
     if (type === 'client') {
@@ -145,6 +146,8 @@ io.use(async (socket, next) => {
       // Temporary: Trust that workerToken is the UID
       socket.data.ownerUid = workerToken; 
       socket.data.role = 'worker';
+      // Register which workspace this worker serves. Default to 'personal' if not specified.
+      socket.data.workspaceId = workspaceId || 'personal';
       return next();
     }
 
@@ -162,18 +165,31 @@ io.on('connection', (socket) => {
   console.log(`Using role: ${role} for user: ${uid} (Socket: ${socket.id})`);
 
   if (role === 'worker') {
+    const wsId = socket.data.workspaceId;
+    const workerKey = wsId; // Key in the inner map
+
     // Register Worker
-    userWorkers.set(uid, socket.id);
-    console.log(`✅ Worker registered for User ${uid}`);
+    if (!userWorkers.has(uid)) {
+        userWorkers.set(uid, new Map());
+    }
+    userWorkers.get(uid)!.set(workerKey, socket.id);
+    
+    console.log(`✅ Worker registered for User ${uid} [Scope: ${workerKey}]`);
     
     // Notify any connected clients of this user
-    io.to(`user:${uid}`).emit('worker-status', { status: 'online' });
+    // We notify generalized status 'online' for this workspace
+    io.to(`user:${uid}`).emit('worker-status', { status: 'online', workspaceId: workerKey });
 
     socket.on('disconnect', () => {
-      userWorkers.delete(uid);
+      if (userWorkers.has(uid)) {
+          userWorkers.get(uid)!.delete(workerKey);
+          if (userWorkers.get(uid)!.size === 0) {
+              userWorkers.delete(uid);
+          }
+      }
       endSessionsByWorker(socket.id, 'worker-disconnected');
-      io.to(`user:${uid}`).emit('worker-status', { status: 'offline' });
-      console.log(`❌ Worker disconnected for User ${uid}`);
+      io.to(`user:${uid}`).emit('worker-status', { status: 'offline', workspaceId: workerKey });
+      console.log(`❌ Worker disconnected for User ${uid} [Scope: ${workerKey}]`);
     });
 
     socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
@@ -193,16 +209,41 @@ io.on('connection', (socket) => {
     socket.join(`user:${uid}`);
 
     // Check if they have a worker online
-    const workerSocketId = userWorkers.get(uid);
-    socket.emit('worker-status', { status: workerSocketId ? 'online' : 'offline' });
+    // Logic: Return status for ALL known workspaces? Or a 'personal' default?
+    // Client will query specific status if needed, but for now we send 'online' if ANY worker is online
+    // or we can iterate and send status for all.
+    const userMap = userWorkers.get(uid);
+    if (userMap) {
+        userMap.forEach((_, wsId) => {
+            socket.emit('worker-status', { status: 'online', workspaceId: wsId });
+        });
+    }
 
     socket.on('create-session', (payload?: { workspaceId?: string; workspaceName?: string; workspaceType?: string }) => {
-        const workerId = userWorkers.get(uid);
+        const targetWsId = payload?.workspaceId || 'personal'; // 'personal' or UUID
+        const userMap = userWorkers.get(uid);
+        
+        // Find best worker:
+        // 1. Exact match (Worker dedicated to this workspace)
+        // 2. Fallback to 'personal'/root worker (if it can handle it - assuming root worker handles everything for now)
+        // For strict isolation, we might demand exact match.
+        // Let's prefer Exact > Personal.
+        
+        let workerId = userMap?.get(targetWsId);
+        let usedWsId = targetWsId;
+
+        // If no dedicated worker, try 'personal' (root worker)
         if (!workerId) {
-            return socket.emit('error', 'No worker available');
+            workerId = userMap?.get('personal');
+            usedWsId = 'personal'; 
         }
 
-        endSessionsByOwner(uid, 'replaced');
+        if (!workerId) {
+            return socket.emit('error', `No active worker found for workspace: ${targetWsId}`);
+        }
+
+        // Only end previous sessions for THIS workspace scope
+        endSessionsByOwner(uid, 'replaced', targetWsId);
 
         const workspaceId = typeof payload?.workspaceId === 'string' ? payload.workspaceId : undefined;
         const workspaceName = typeof payload?.workspaceName === 'string' ? payload.workspaceName : undefined;
@@ -221,6 +262,9 @@ io.on('connection', (socket) => {
         socket.join(sessionId); // Client joins session room
 
         // Tell worker to spawn a PTY shell
+        // Notes: If this is a dedicated worker (usedWsId === targetWsId === workspaceId), it probably mounts root at /workspace.
+        // If it is a personal worker handling a sub-workspace, it mounts at /workspace/_ws/ID.
+        // We pass the workspaceId so the worker can decide (see next step in Worker logic).
         io.to(workerId).emit('session-created', {
             id: sessionId,
             workspaceId,
