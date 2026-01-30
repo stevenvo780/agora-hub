@@ -1,0 +1,17 @@
+[Unit]
+Description=Education Cooperative Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edu-hub
+Group=edu-hub
+WorkingDirectory=/opt/edu-hub
+EnvironmentFile=-/etc/edu-hub/hub.env
+ExecStart=/usr/bin/node /opt/edu-hub/dist/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
