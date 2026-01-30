@@ -24,7 +24,7 @@ if (!admin.apps.length) {
     }
     if (serviceAccount) {
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
+       
         projectId: process.env.FIREBASE_PROJECT_ID,
       });
     } else {
@@ -242,8 +242,8 @@ io.on('connection', (socket) => {
             return socket.emit('error', `No active worker found for workspace: ${targetWsId}`);
         }
 
-        // Only end previous sessions for THIS workspace scope
-        endSessionsByOwner(uid, 'replaced', targetWsId);
+        // Allow multiple sessions (tabs) per user.
+        // We do NOT call endSessionsByOwner here anymore.
 
         const workspaceId = typeof payload?.workspaceId === 'string' ? payload.workspaceId : undefined;
         const workspaceName = typeof payload?.workspaceName === 'string' ? payload.workspaceName : undefined;
@@ -295,6 +295,17 @@ io.on('connection', (socket) => {
             cols: data.cols,
             rows: data.rows
         });
+    });
+
+    socket.on('kill-session', (data: { sessionId: string }) => {
+        const session = sessions.get(data.sessionId);
+        if (!session || session.ownerUid !== uid) return;
+        
+        // Notify worker to kill process
+        io.to(session.workerSocketId).emit('kill-session', { sessionId: data.sessionId });
+        
+        // Clean up locally
+        endSession(data.sessionId, 'user-terminated');
     });
 
     socket.on('disconnect', () => {
