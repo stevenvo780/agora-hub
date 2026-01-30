@@ -220,6 +220,7 @@ io.on('connection', (socket) => {
     }
 
     socket.on('create-session', (payload?: { workspaceId?: string; workspaceName?: string; workspaceType?: string }) => {
+        console.log(`[Hub] create-session request from ${uid}`, payload);
         const targetWsId = payload?.workspaceId || 'personal'; // 'personal' or UUID
         const userMap = userWorkers.get(uid);
         
