@@ -37,8 +37,32 @@ if (!admin.apps.length) {
 
 const app = express();
 
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:3000';
-app.use(cors({ origin: CLIENT_ORIGIN }));
+// Parse CLIENT_ORIGIN as comma-separated list or single origin
+const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN || 'http://localhost:3000')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+// CORS configuration that accepts multiple origins
+const corsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    // Allow requests with no origin (like mobile apps, curl, etc)
+    if (!origin) return callback(null, true);
+    // Check if origin is in allowed list
+    if (CLIENT_ORIGINS.some(allowed => origin === allowed || origin.startsWith(allowed.replace(/\/$/, '')))) {
+      return callback(null, true);
+    }
+    // Allow localhost for development
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+    console.warn(`⚠️ CORS blocked origin: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET', 'POST']
+};
+
+app.use(cors(corsOptions));
 
 let httpServer;
 const sslKeyPath = process.env.SSL_KEY_PATH;
@@ -63,10 +87,7 @@ if (sslKeyPath && sslCertPath && existsSync(sslKeyPath) && existsSync(sslCertPat
 }
 
 const io = new Server(httpServer, {
-  cors: {
-    origin: CLIENT_ORIGIN,
-    methods: ['GET', 'POST']
-  }
+  cors: corsOptions
 });
 
 // =====================================================
@@ -389,6 +410,37 @@ io.on('connection', (socket) => {
       console.log(`👤 Client disconnected: ${uid}`);
     });
   }
+});
+
+// =====================================================
+// DEBUG ENDPOINTS
+// =====================================================
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/status', (req, res) => {
+  const workers = Array.from(workersByWorkspace.entries()).map(([id, info]) => ({
+    workspaceId: id,
+    socketId: info.socketId,
+    workspaceType: info.workspaceType,
+    ownerId: info.ownerId,
+    connected: info.socket.connected
+  }));
+  
+  const activeSessions = Array.from(sessions.entries()).map(([id, session]) => ({
+    sessionId: id,
+    workspaceId: session.workspaceId,
+    workspaceType: session.workspaceType,
+    ownerUid: session.ownerUid
+  }));
+
+  res.json({
+    workers,
+    sessions: activeSessions,
+    totalWorkers: workers.length,
+    totalSessions: activeSessions.length
+  });
 });
 
 // =====================================================
