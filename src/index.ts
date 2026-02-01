@@ -9,7 +9,6 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Initialize Firebase Admin
 if (!admin.apps.length) {
   try {
     const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -37,22 +36,17 @@ if (!admin.apps.length) {
 
 const app = express();
 
-// Parse CLIENT_ORIGIN as comma-separated list or single origin
 const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN || 'http://localhost:3000')
   .split(',')
   .map(o => o.trim())
   .filter(Boolean);
 
-// CORS configuration that accepts multiple origins
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    // Allow requests with no origin (like mobile apps, curl, etc)
     if (!origin) return callback(null, true);
-    // Check if origin is in allowed list
     if (CLIENT_ORIGINS.some(allowed => origin === allowed || origin.startsWith(allowed.replace(/\/$/, '')))) {
       return callback(null, true);
     }
-    // Allow localhost for development
     if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
       return callback(null, true);
     }
@@ -90,44 +84,31 @@ const io = new Server(httpServer, {
   cors: corsOptions
 });
 
-// =====================================================
-// NEW ARCHITECTURE: Workers by Workspace (not by User)
-// =====================================================
-// Token formats:
-// - "personal:{userId}" -> Personal workspace for that user
-// - "{workspaceId}" -> Shared workspace (UUID)
-// =====================================================
-
 interface WorkerInfo {
   socketId: string;
   socket: Socket;
   workspaceType: 'personal' | 'shared';
-  ownerId?: string; // For personal workspaces, the user who owns it
+  ownerId?: string;
 }
 
 interface SessionData {
-  ownerUid: string;         // User who created the session
-  workerSocketId: string;   // Worker handling this session
-  workspaceId: string;      // Workspace this session belongs to
+  ownerUid: string;
+  workerSocketId: string;
+  workspaceId: string;
   workspaceName?: string;
   workspaceType: 'personal' | 'shared';
   output: string;
 }
 
-// Map<workspaceId, WorkerInfo>
-// workspaceId = "personal:{userId}" or "{sharedWorkspaceId}"
 const workersByWorkspace = new Map<string, WorkerInfo>();
 
-// Map<sessionId, SessionData>
 const sessions = new Map<string, SessionData>();
 
-// Parse token to get workspace info
 function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } {
   if (token.startsWith('personal:')) {
     const ownerId = token.substring('personal:'.length);
     return { workspaceId: token, workspaceType: 'personal', ownerId };
   }
-  // It's a shared workspace UUID
   return { workspaceId: token, workspaceType: 'shared' };
 }
 
@@ -146,7 +127,6 @@ const endSessionsByWorker = (workerSocketId: string, reason: string) => {
   }
 };
 
-// Notify all clients in a workspace room about worker status
 const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline') => {
   console.log(`[Hub] Broadcasting worker-status: ${status} for workspace: ${workspaceId}`);
   io.to(`workspace:${workspaceId}`).emit('worker-status', { 
@@ -155,9 +135,6 @@ const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline'
   });
 };
 
-// =====================================================
-// MIDDLEWARE: Authentication
-// =====================================================
 io.use(async (socket, next) => {
   const { type, token, workerToken, uid } = socket.handshake.auth;
 
@@ -169,7 +146,6 @@ io.use(async (socket, next) => {
         const decodedToken = await admin.auth().verifyIdToken(token);
         socket.data.uid = decodedToken.uid;
       } catch (e) {
-        // Fallback for Dev/Custom Auth
         if (token === 'mock-token' && uid) {
           console.warn(`⚠️ Allowing insecure connection for User ${uid} (Mock Token)`);
           socket.data.uid = uid;
@@ -183,7 +159,6 @@ io.use(async (socket, next) => {
     } 
     
     if (type === 'worker') {
-      // Worker token is the workspaceId (or "personal:{userId}")
       if (!workerToken) return next(new Error('Missing worker token'));
       
       const parsed = parseWorkerToken(workerToken);
@@ -202,21 +177,14 @@ io.use(async (socket, next) => {
   }
 });
 
-// =====================================================
-// CONNECTION HANDLING
-// =====================================================
 io.on('connection', (socket) => {
   const role = socket.data.role;
 
-  // =====================================================
-  // WORKER CONNECTION
-  // =====================================================
   if (role === 'worker') {
     const workspaceId = socket.data.workspaceId;
     const workspaceType = socket.data.workspaceType;
     const ownerId = socket.data.ownerId;
 
-    // Check if there's already a worker for this workspace
     const existing = workersByWorkspace.get(workspaceId);
     if (existing) {
       console.log(`⚠️ Worker already exists for workspace ${workspaceId}, replacing...`);
@@ -224,7 +192,6 @@ io.on('connection', (socket) => {
       endSessionsByWorker(existing.socketId, 'worker-replaced');
     }
 
-    // Register this worker
     workersByWorkspace.set(workspaceId, {
       socketId: socket.id,
       socket,
@@ -234,10 +201,8 @@ io.on('connection', (socket) => {
 
     console.log(`✅ Worker registered for Workspace: ${workspaceId} [Type: ${workspaceType}]`);
     
-    // Notify clients subscribed to this workspace
     notifyWorkspaceStatus(workspaceId, 'online');
 
-    // Handle worker disconnect
     socket.on('disconnect', () => {
       const current = workersByWorkspace.get(workspaceId);
       if (current?.socketId === socket.id) {
@@ -248,7 +213,6 @@ io.on('connection', (socket) => {
       }
     });
 
-    // Forward output from worker to session
     socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
       const session = sessions.get(payload.sessionId);
       if (!session || session.workerSocketId !== socket.id) return;
@@ -258,7 +222,6 @@ io.on('connection', (socket) => {
       });
     });
 
-    // Session ended by worker
     socket.on('session-ended', (payload: { sessionId: string; reason: string }) => {
       const session = sessions.get(payload.sessionId);
       if (session && session.workerSocketId === socket.id) {
@@ -267,14 +230,10 @@ io.on('connection', (socket) => {
     });
   }
 
-  // =====================================================
-  // CLIENT CONNECTION
-  // =====================================================
   if (role === 'client') {
     const uid = socket.data.uid;
     console.log(`👤 Client connected: ${uid} (Socket: ${socket.id})`);
 
-    // Client subscribes to workspace updates
     socket.on('workspace:subscribe', (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const roomName = `workspace:${workspaceId}`;
@@ -282,7 +241,6 @@ io.on('connection', (socket) => {
       socket.join(roomName);
       console.log(`[Hub] Client ${uid} subscribed to ${roomName}`);
 
-      // Send current worker status for this workspace
       const worker = workersByWorkspace.get(workspaceId);
       socket.emit('worker-status', {
         status: worker ? 'online' : 'offline',
@@ -290,7 +248,6 @@ io.on('connection', (socket) => {
       });
     });
 
-    // Client unsubscribes from workspace
     socket.on('workspace:unsubscribe', (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const roomName = `workspace:${workspaceId}`;
@@ -298,7 +255,6 @@ io.on('connection', (socket) => {
       console.log(`[Hub] Client ${uid} unsubscribed from ${roomName}`);
     });
 
-    // Check worker status for a specific workspace
     socket.on('workspace:check-worker', (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const worker = workersByWorkspace.get(workspaceId);
@@ -308,13 +264,11 @@ io.on('connection', (socket) => {
       });
     });
 
-    // Create terminal session for a workspace
     socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared' }) => {
       const { workspaceId, workspaceName, workspaceType = 'shared' } = payload;
       
       console.log(`[Hub] create-session request from ${uid} for workspace ${workspaceId}`);
 
-      // Find worker for this workspace
       const worker = workersByWorkspace.get(workspaceId);
       
       if (!worker) {
@@ -338,7 +292,6 @@ io.on('connection', (socket) => {
 
       socket.join(sessionId);
 
-      // Tell worker to spawn PTY
       io.to(worker.socketId).emit('session-created', {
         id: sessionId,
         workspaceId,
@@ -354,7 +307,6 @@ io.on('connection', (socket) => {
       console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
     });
 
-    // Execute command in session
     socket.on('execute', (data: { sessionId: string; command: string }) => {
       const session = sessions.get(data.sessionId);
       if (!session || session.ownerUid !== uid) return;
@@ -365,7 +317,6 @@ io.on('connection', (socket) => {
       });
     });
 
-    // Resize terminal
     socket.on('resize', (data: { sessionId: string; cols: number; rows: number }) => {
       const session = sessions.get(data.sessionId);
       if (!session || session.ownerUid !== uid) return;
@@ -377,7 +328,6 @@ io.on('connection', (socket) => {
       });
     });
 
-    // Kill session
     socket.on('kill-session', (data: { sessionId: string }) => {
       const session = sessions.get(data.sessionId);
       if (!session || session.ownerUid !== uid) return;
@@ -386,9 +336,7 @@ io.on('connection', (socket) => {
       endSession(data.sessionId, 'user-terminated');
     });
 
-    // Client disconnect
     socket.on('disconnect', () => {
-      // End sessions owned by this user
       for (const [sessionId, session] of sessions.entries()) {
         if (session.ownerUid === uid) {
           endSession(sessionId, 'client-disconnected');
@@ -399,9 +347,6 @@ io.on('connection', (socket) => {
   }
 });
 
-// =====================================================
-// DEBUG ENDPOINTS
-// =====================================================
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -430,9 +375,6 @@ app.get('/status', (req, res) => {
   });
 });
 
-// =====================================================
-// SERVER START
-// =====================================================
 const resolvePort = () => {
   if (process.env.PORT) {
     return parseInt(process.env.PORT, 10);
