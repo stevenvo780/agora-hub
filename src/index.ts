@@ -11,19 +11,37 @@ dotenv.config();
 
 if (!admin.apps.length) {
   try {
-    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
     let serviceAccount: admin.ServiceAccount | null = null;
-    if (serviceAccountRaw) {
+
+    // Option 1: GOOGLE_APPLICATION_CREDENTIALS (file path)
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    if (credentialsPath && existsSync(credentialsPath)) {
       try {
-        serviceAccount = JSON.parse(serviceAccountRaw) as admin.ServiceAccount;
-      } catch (parseError) {
-        console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
+        const fileContent = readFileSync(credentialsPath, 'utf-8');
+        serviceAccount = JSON.parse(fileContent) as admin.ServiceAccount;
+        console.log('🔑 Loaded credentials from file:', credentialsPath);
+      } catch (fileError) {
+        console.warn('Failed to read GOOGLE_APPLICATION_CREDENTIALS file:', fileError);
       }
     }
+
+    // Option 2: FIREBASE_SERVICE_ACCOUNT (inline JSON)
+    if (!serviceAccount) {
+      const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+      if (serviceAccountRaw) {
+        try {
+          serviceAccount = JSON.parse(serviceAccountRaw) as admin.ServiceAccount;
+          console.log('🔑 Loaded credentials from FIREBASE_SERVICE_ACCOUNT env');
+        } catch (parseError) {
+          console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
+        }
+      }
+    }
+
     if (serviceAccount) {
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: process.env.FIREBASE_PROJECT_ID,
+        projectId: process.env.FIREBASE_PROJECT_ID || (serviceAccount as any).project_id,
       });
     } else {
       admin.initializeApp();
