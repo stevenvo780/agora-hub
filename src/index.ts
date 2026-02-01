@@ -131,11 +131,6 @@ function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 
   return { workspaceId: token, workspaceType: 'shared' };
 }
 
-// Get workspaceId for a user's personal space
-function getPersonalWorkspaceId(userId: string): string {
-  return `personal:${userId}`;
-}
-
 const endSession = (sessionId: string, reason: string) => {
   const session = sessions.get(sessionId);
   if (!session) return;
@@ -146,14 +141,6 @@ const endSession = (sessionId: string, reason: string) => {
 const endSessionsByWorker = (workerSocketId: string, reason: string) => {
   for (const [sessionId, session] of sessions.entries()) {
     if (session.workerSocketId === workerSocketId) {
-      endSession(sessionId, reason);
-    }
-  }
-};
-
-const endSessionsByWorkspace = (workspaceId: string, reason: string) => {
-  for (const [sessionId, session] of sessions.entries()) {
-    if (session.workspaceId === workspaceId) {
       endSession(sessionId, reason);
     }
   }
