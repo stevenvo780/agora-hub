@@ -166,16 +166,14 @@ io.use(async (socket, next) => {
     if (type === 'client') {
       if (!token) return next(new Error('Missing client token'));
       
+      // Verify Firebase token
       try {
         const decodedToken = await admin.auth().verifyIdToken(token);
         socket.data.uid = decodedToken.uid;
+        console.log(`✅ Client authenticated: ${decodedToken.uid}`);
       } catch (e) {
-        if (token === 'mock-token' && uid) {
-          console.warn(`⚠️ Allowing insecure connection for User ${uid} (Mock Token)`);
-          socket.data.uid = uid;
-        } else {
-          throw e;
-        }
+        console.error('Token verification failed:', e);
+        return next(new Error('Authentication failed'));
       }
       
       socket.data.role = 'client';
