@@ -104,6 +104,10 @@ const workersByWorkspace = new Map<string, WorkerInfo>();
 
 const sessions = new Map<string, SessionData>();
 
+// Debounce para notificaciones de status del worker (evita spam offline/online)
+const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
+const STATUS_DEBOUNCE_MS = 2000; // 2 segundos de gracia antes de notificar offline
+
 function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } {
   if (token.startsWith('personal:')) {
     const ownerId = token.substring('personal:'.length);
@@ -128,11 +132,31 @@ const endSessionsByWorker = (workerSocketId: string, reason: string) => {
 };
 
 const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline') => {
-  console.log(`[Hub] Broadcasting worker-status: ${status} for workspace: ${workspaceId}`);
-  io.to(`workspace:${workspaceId}`).emit('worker-status', { 
-    status, 
-    workspaceId 
-  });
+  // Cancelar cualquier notificación pendiente
+  const pending = pendingStatusNotifications.get(workspaceId);
+  if (pending) {
+    clearTimeout(pending);
+    pendingStatusNotifications.delete(workspaceId);
+  }
+
+  if (status === 'online') {
+    // Online se notifica inmediatamente
+    console.log(`[Hub] Broadcasting worker-status: ${status} for workspace: ${workspaceId}`);
+    io.to(`workspace:${workspaceId}`).emit('worker-status', { status, workspaceId });
+  } else {
+    // Offline usa debounce - solo notifica si después de 2s sigue sin worker
+    const timeout = setTimeout(() => {
+      const worker = workersByWorkspace.get(workspaceId);
+      if (!worker) {
+        console.log(`[Hub] Broadcasting worker-status: offline for workspace: ${workspaceId} (confirmed)`);
+        io.to(`workspace:${workspaceId}`).emit('worker-status', { status: 'offline', workspaceId });
+      } else {
+        console.log(`[Hub] Skipping offline notification - worker reconnected for: ${workspaceId}`);
+      }
+      pendingStatusNotifications.delete(workspaceId);
+    }, STATUS_DEBOUNCE_MS);
+    pendingStatusNotifications.set(workspaceId, timeout);
+  }
 };
 
 io.use(async (socket, next) => {
