@@ -211,8 +211,15 @@ io.on('connection', (socket) => {
 
     const existing = workersByWorkspace.get(workspaceId);
     if (existing) {
-      console.log(`⚠️ Worker already exists for workspace ${workspaceId}, replacing...`);
-      existing.socket.disconnect(true);
+      // Si el socket existente aún está conectado, rechazar la nueva conexión
+      if (existing.socket.connected) {
+        console.log(`⚠️ Worker already connected for workspace ${workspaceId}, rejecting duplicate`);
+        socket.emit('error', { message: 'Worker already connected for this workspace' });
+        socket.disconnect(true);
+        return;
+      }
+      // Si el socket existente ya no está conectado, limpiar
+      console.log(`🔄 Cleaning up stale worker for workspace ${workspaceId}`);
       endSessionsByWorker(existing.socketId, 'worker-replaced');
     }
 
