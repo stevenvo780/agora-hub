@@ -210,6 +210,19 @@ io.use(async (socket, next) => {
       return next();
     }
 
+    // sync-agent: proceso de sincronización de archivos
+    if (type === 'sync-agent') {
+      if (!workerToken) return next(new Error('Missing worker token for sync-agent'));
+      
+      const parsed = parseWorkerToken(workerToken);
+      socket.data.workspaceId = parsed.workspaceId;
+      socket.data.workspaceType = parsed.workspaceType;
+      socket.data.ownerId = parsed.ownerId;
+      socket.data.role = 'sync-agent';
+      
+      return next();
+    }
+
     return next(new Error('Invalid connection type'));
   } catch (err) {
     console.error('Auth Error:', err);
@@ -274,6 +287,29 @@ io.on('connection', (socket) => {
       if (session && session.workerSocketId === socket.id) {
         endSession(payload.sessionId, payload.reason);
       }
+    });
+  }
+
+  // Handler para sync-agent: reenvía eventos de cambios de documentos a los clientes
+  if (role === 'sync-agent') {
+    const workspaceId = socket.data.workspaceId;
+    console.log(`📁 Sync-Agent connected for Workspace: ${workspaceId} (Socket: ${socket.id})`);
+
+    socket.on('doc-change', (payload: { 
+      workspaceId: string; 
+      docId: string; 
+      action: 'created' | 'updated' | 'deleted';
+      data?: { name?: string; parentId?: string | null };
+    }) => {
+      const roomName = `workspace:${payload.workspaceId}`;
+      console.log(`[Hub] doc-change: ${payload.action} ${payload.docId} in ${payload.workspaceId}`);
+      
+      // Reenviar a todos los clientes suscritos al workspace
+      io.to(roomName).emit('doc-change', payload);
+    });
+
+    socket.on('disconnect', () => {
+      console.log(`📁 Sync-Agent disconnected for Workspace: ${workspaceId}`);
     });
   }
 
