@@ -189,6 +189,12 @@ io.use(async (socket, next) => {
         const decodedToken = await admin.auth().verifyIdToken(token);
         socket.data.uid = decodedToken.uid;
         console.log(`✅ Client authenticated: ${decodedToken.uid}`);
+        
+        // Check for session ID attempt
+        if (socket.handshake.auth.sessionId) {
+          socket.data.requestedSessionId = socket.handshake.auth.sessionId;
+        }
+
       } catch (e) {
         console.error('Token verification failed:', e);
         return next(new Error('Authentication failed'));
@@ -317,6 +323,27 @@ io.on('connection', (socket) => {
     const uid = socket.data.uid;
     console.log(`👤 Client connected: ${uid} (Socket: ${socket.id})`);
 
+    // Attempt Session Restoration
+    if (socket.data.requestedSessionId) {
+       const session = sessions.get(socket.data.requestedSessionId);
+       if (session && session.ownerUid === uid) {
+          console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
+          socket.join(socket.data.requestedSessionId);
+          
+          socket.emit('session-created', { // Send as session-created to reuse frontend logic or specific restored event
+             id: socket.data.requestedSessionId,
+             workspaceId: session.workspaceId,
+             workspaceName: session.workspaceName,
+             workspaceType: session.workspaceType
+          });
+
+          // Also replay output if we had a buffer (we don't store full buffer currently, only 'output' string in interface but not populated?)
+          // The interface SessionData has 'output: string'. Let's see if it's used.
+          // In 'output' event handler: io.to... emit. It doesn't save to session.output. 
+          // Ideally we should buffer last N lines. But strict requirement is just keeping the connection alive.
+       }
+    }
+
     socket.on('workspace:subscribe', (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const roomName = `workspace:${workspaceId}`;
@@ -420,12 +447,12 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-      for (const [sessionId, session] of sessions.entries()) {
-        if (session.ownerUid === uid) {
-          endSession(sessionId, 'client-disconnected');
-        }
-      }
+      // Don't kill sessions on disconnect to allow persistence
+      // Only log the event
       console.log(`👤 Client disconnected: ${uid}`);
+      
+      // Optional: Set a timeout to clean up abandoned sessions after a long time (e.g. 1 hour)
+      // But for now, we keep them as per user request "sesiones deben ser persistentes"
     });
   }
 });
