@@ -132,23 +132,45 @@ const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
 const WORKER_SECRET = process.env.WORKER_SECRET || 'default-insecure-secret-do-not-use';
 
+// Parse legacy token format (for backward compatibility during migration)
+function parseLegacyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
+  // Legacy format: "personal:userId" or "workspaceId"
+  if (!token || token.includes('.')) return null; // Not a legacy token if it has a dot (signed format)
+  
+  if (token.startsWith('personal:')) {
+    const ownerId = token.substring('personal:'.length);
+    return { workspaceId: token, workspaceType: 'personal', ownerId };
+  }
+  return { workspaceId: token, workspaceType: 'shared' };
+}
+
 function verifyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
+  // First try signed token format
   try {
     const [payloadB64, signature] = token.split('.');
-    if (!payloadB64 || !signature) return null;
+    if (payloadB64 && signature) {
+      const expectedSignature = crypto
+        .createHmac('sha256', WORKER_SECRET)
+        .update(payloadB64)
+        .digest('hex');
 
-    const expectedSignature = crypto
-      .createHmac('sha256', WORKER_SECRET)
-      .update(payloadB64)
-      .digest('hex');
-
-    if (signature !== expectedSignature) return null;
-
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
-    return payload; // { workspaceId, workspaceType, ownerId, timestamp? }
+      if (signature === expectedSignature) {
+        const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
+        return payload; // { workspaceId, workspaceType, ownerId, timestamp? }
+      }
+    }
   } catch (e) {
-    return null;
+    // Continue to legacy fallback
   }
+  
+  // Fallback to legacy format (TEMPORARY - remove after all workers are updated)
+  const legacyParsed = parseLegacyWorkerToken(token);
+  if (legacyParsed) {
+    console.warn(`⚠️ Legacy token format used for workspace: ${legacyParsed.workspaceId} - Please update worker`);
+    return legacyParsed;
+  }
+  
+  return null;
 }
 
 const notifyWorkspaceSessions = (workspaceId: string) => {
