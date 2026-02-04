@@ -6,6 +6,7 @@ import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
 import dotenv from 'dotenv';
+import * as crypto from 'crypto';
 
 dotenv.config();
 
@@ -63,12 +64,16 @@ const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN || 'http://localhost:3000')
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     if (!origin) return callback(null, true);
-    if (CLIENT_ORIGINS.some(allowed => origin === allowed || origin.startsWith(allowed.replace(/\/$/, '')))) {
-      return callback(null, true);
+    
+    try {
+      const originUrl = new URL(origin);
+      if (CLIENT_ORIGINS.some(allowed => origin === allowed || allowed === originUrl.origin)) {
+        return callback(null, true);
+      }
+    } catch (e) {
+      // Invalid origin URL
     }
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      return callback(null, true);
-    }
+    
     console.warn(`⚠️ CORS blocked origin: ${origin}`);
     callback(new Error('Not allowed by CORS'));
   },
@@ -125,15 +130,26 @@ const sessions = new Map<string, SessionData>();
 
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
+const WORKER_SECRET = process.env.WORKER_SECRET || 'default-insecure-secret-do-not-use';
 
-function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } {
-  if (token.startsWith('personal:')) {
-    const ownerId = token.substring('personal:'.length);
-    return { workspaceId: token, workspaceType: 'personal', ownerId };
+function verifyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
+  try {
+    const [payloadB64, signature] = token.split('.');
+    if (!payloadB64 || !signature) return null;
+
+    const expectedSignature = crypto
+      .createHmac('sha256', WORKER_SECRET)
+      .update(payloadB64)
+      .digest('hex');
+
+    if (signature !== expectedSignature) return null;
+
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
+    return payload; // { workspaceId, workspaceType, ownerId, timestamp? }
+  } catch (e) {
+    return null;
   }
-  return { workspaceId: token, workspaceType: 'shared' };
 }
-
 
 const notifyWorkspaceSessions = (workspaceId: string) => {
   const activeSessions = Array.from(sessions.values())
@@ -228,11 +244,17 @@ io.use(async (socket, next) => {
     
     if (type === 'worker') {
       if (!workerToken) return next(new Error('Missing worker token'));
+
+      const payload = verifyWorkerToken(workerToken);
+      if (!payload) {
+        console.warn(`⚠️ Invalid worker token signature`);
+        return next(new Error('Unauthorized: Invalid token'));
+      }
       
-      const parsed = parseWorkerToken(workerToken);
-      socket.data.workspaceId = parsed.workspaceId;
-      socket.data.workspaceType = parsed.workspaceType;
-      socket.data.ownerId = parsed.ownerId;
+      const { workspaceId, workspaceType, ownerId } = payload;
+      socket.data.workspaceId = workspaceId;
+      socket.data.workspaceType = workspaceType;
+      socket.data.ownerId = ownerId;
       socket.data.role = 'worker';
       
       return next();
@@ -241,28 +263,24 @@ io.use(async (socket, next) => {
     if (type === 'sync-agent') {
       if (!workerToken) return next(new Error('Missing worker token for sync-agent'));
 
-      // Validate Shared Secret
-      const expectedSecret = process.env.WORKER_SECRET;
-      const providedSecret = socket.handshake.auth.secret;
+      // Reusing verifyWorkerToken instead of raw secret check
+      const payload = verifyWorkerToken(workerToken);
       
-      if (expectedSecret && providedSecret !== expectedSecret) {
-        console.warn(`⚠️ Blocked unauthorized sync-agent connection (Wrong Secret)`);
-        return next(new Error('Unauthorized: Invalid secret'));
+      if (!payload) {
+        console.warn(`⚠️ Blocked unauthorized sync-agent connection (Invalid Token)`);
+        return next(new Error('Unauthorized: Invalid token'));
       }
-      
-      const parsed = parseWorkerToken(workerToken);
-      socket.data.workspaceId = parsed.workspaceId;
-      socket.data.workspaceType = parsed.workspaceType;
-      socket.data.ownerId = parsed.ownerId;
+       
       socket.data.role = 'sync-agent';
-      
+      // ... allow connection
+            
       return next();
     }
 
-    return next(new Error('Invalid connection type'));
-  } catch (err) {
-    console.error('Auth Error:', err);
-    return next(new Error('Authentication failed'));
+    return next(new Error('Unknown connection type'));
+  } catch (e) {
+    console.error('Connection error:', e);
+    return next(new Error('Internal Server Error'));
   }
 });
 
@@ -535,7 +553,26 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.get('/status', (req, res) => {
+// Protected status endpoint (basic auth or admin token)
+app.get('/status', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+     // Verify idToken or a special admin token
+     // Here we re-use firebase admin to verify it's a valid user
+     const decoded = await admin.auth().verifyIdToken(token);
+     // Optional: check if user is admin
+     // if (!decoded.admin) return res.status(403).json({ error: 'Forbidden' });
+     console.log(`🔎 Status checked by ${decoded.uid}`);
+  } catch (e) {
+     console.warn('Status endpoint auth failed');
+     return res.status(403).json({ error: 'Forbidden' });
+  }
+
   const workers = Array.from(workersByWorkspace.entries()).map(([id, info]) => ({
     workspaceId: id,
     socketId: info.socketId,
