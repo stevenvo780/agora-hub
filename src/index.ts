@@ -9,6 +9,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+type ServiceAccountWithProjectId = admin.ServiceAccount & { project_id?: string };
+
 if (!admin.apps.length) {
   try {
     let serviceAccount: admin.ServiceAccount | null = null;
@@ -39,9 +41,10 @@ if (!admin.apps.length) {
     }
 
     if (serviceAccount) {
+      const serviceAccountWithProjectId = serviceAccount as ServiceAccountWithProjectId;
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: process.env.FIREBASE_PROJECT_ID || (serviceAccount as any).project_id,
+        projectId: process.env.FIREBASE_PROJECT_ID || serviceAccountWithProjectId.project_id,
       });
     } else {
       admin.initializeApp();
@@ -178,7 +181,7 @@ const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline'
 };
 
 io.use(async (socket, next) => {
-  const { type, token, workerToken, uid } = socket.handshake.auth;
+  const { type, token, workerToken } = socket.handshake.auth;
 
   try {
     if (type === 'client') {
@@ -371,6 +374,25 @@ io.on('connection', (socket) => {
       socket.emit('worker-status', {
         status: worker ? 'online' : 'offline',
         workspaceId
+      });
+    });
+
+    socket.on('restore-session', (payload: { sessionId?: string }) => {
+      const sessionId = payload?.sessionId;
+      if (!sessionId) return;
+
+      const session = sessions.get(sessionId);
+      if (!session || session.ownerUid !== uid) {
+        socket.emit('session-ended', { sessionId, reason: 'restore-failed' });
+        return;
+      }
+
+      socket.join(sessionId);
+      socket.emit('session-created', {
+        id: sessionId,
+        workspaceId: session.workspaceId,
+        workspaceName: session.workspaceName,
+        workspaceType: session.workspaceType
       });
     });
 
