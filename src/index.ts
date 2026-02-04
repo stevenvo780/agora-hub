@@ -240,6 +240,15 @@ io.use(async (socket, next) => {
 
     if (type === 'sync-agent') {
       if (!workerToken) return next(new Error('Missing worker token for sync-agent'));
+
+      // Validate Shared Secret
+      const expectedSecret = process.env.WORKER_SECRET;
+      const providedSecret = socket.handshake.auth.secret;
+      
+      if (expectedSecret && providedSecret !== expectedSecret) {
+        console.warn(`⚠️ Blocked unauthorized sync-agent connection (Wrong Secret)`);
+        return next(new Error('Unauthorized: Invalid secret'));
+      }
       
       const parsed = parseWorkerToken(workerToken);
       socket.data.workspaceId = parsed.workspaceId;
