@@ -31,6 +31,11 @@ mkdir -p "$STAGE_DIR"
 cp "$ROOT_DIR/package.json" "$ROOT_DIR/package-lock.json" "$STAGE_DIR/"
 npm ci --omit=dev --prefix "$STAGE_DIR"
 
+# Evita que un .deb previo termine empaquetado dentro de dist
+if [ -d "$ROOT_DIR/dist" ]; then
+  find "$ROOT_DIR/dist" -type f -name "*.deb" -delete
+fi
+
 cp -r "$ROOT_DIR/dist" "$BUILD_DIR/opt/edu-hub/dist"
 cp "$ROOT_DIR/package.json" "$BUILD_DIR/opt/edu-hub/"
 cp -r "$STAGE_DIR/node_modules" "$BUILD_DIR/opt/edu-hub/node_modules"
