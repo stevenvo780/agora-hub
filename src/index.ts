@@ -15,7 +15,6 @@ if (!admin.apps.length) {
   try {
     let serviceAccount: admin.ServiceAccount | null = null;
 
-    // Option 1: GOOGLE_APPLICATION_CREDENTIALS (file path)
     const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
     if (credentialsPath && existsSync(credentialsPath)) {
       try {
@@ -27,7 +26,6 @@ if (!admin.apps.length) {
       }
     }
 
-    // Option 2: FIREBASE_SERVICE_ACCOUNT (inline JSON)
     if (!serviceAccount) {
       const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
       if (serviceAccountRaw) {
@@ -125,9 +123,8 @@ const workersByWorkspace = new Map<string, WorkerInfo>();
 
 const sessions = new Map<string, SessionData>();
 
-// Debounce para notificaciones de status del worker (evita spam offline/online)
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
-const STATUS_DEBOUNCE_MS = 2000; // 2 segundos de gracia antes de notificar offline
+const STATUS_DEBOUNCE_MS = 2000;
 
 function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } {
   if (token.startsWith('personal:')) {
@@ -180,7 +177,6 @@ const endSessionsByWorker = (workerSocketId: string, reason: string) => {
 };
 
 const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline') => {
-  // Cancelar cualquier notificación pendiente
   const pending = pendingStatusNotifications.get(workspaceId);
   if (pending) {
     clearTimeout(pending);
@@ -188,11 +184,9 @@ const notifyWorkspaceStatus = (workspaceId: string, status: 'online' | 'offline'
   }
 
   if (status === 'online') {
-    // Online se notifica inmediatamente
     console.log(`[Hub] Broadcasting worker-status: ${status} for workspace: ${workspaceId}`);
     io.to(`workspace:${workspaceId}`).emit('worker-status', { status, workspaceId });
   } else {
-    // Offline usa debounce - solo notifica si después de 2s sigue sin worker
     const timeout = setTimeout(() => {
       const worker = workersByWorkspace.get(workspaceId);
       if (!worker) {
@@ -213,14 +207,12 @@ io.use(async (socket, next) => {
   try {
     if (type === 'client') {
       if (!token) return next(new Error('Missing client token'));
-      
-      // Verify Firebase token
+
       try {
         const decodedToken = await admin.auth().verifyIdToken(token);
         socket.data.uid = decodedToken.uid;
         console.log(`✅ Client authenticated: ${decodedToken.uid}`);
-        
-        // Check for session ID attempt
+
         if (socket.handshake.auth.sessionId) {
           socket.data.requestedSessionId = socket.handshake.auth.sessionId;
         }
@@ -246,7 +238,6 @@ io.use(async (socket, next) => {
       return next();
     }
 
-    // sync-agent: proceso de sincronización de archivos
     if (type === 'sync-agent') {
       if (!workerToken) return next(new Error('Missing worker token for sync-agent'));
       
@@ -276,14 +267,12 @@ io.on('connection', (socket) => {
 
     const existing = workersByWorkspace.get(workspaceId);
     if (existing) {
-      // Si el socket existente aún está conectado, rechazar la nueva conexión
       if (existing.socket.connected) {
         console.log(`⚠️ Worker already connected for workspace ${workspaceId}, rejecting duplicate`);
         socket.emit('error', { message: 'Worker already connected for this workspace' });
         socket.disconnect(true);
         return;
       }
-      // Si el socket existente ya no está conectado, limpiar
       console.log(`🔄 Cleaning up stale worker for workspace ${workspaceId}`);
       endSessionsByWorker(existing.socketId, 'worker-replaced');
     }
@@ -326,7 +315,6 @@ io.on('connection', (socket) => {
     });
   }
 
-  // Handler para sync-agent: reenvía eventos de cambios de documentos a los clientes
   if (role === 'sync-agent') {
     const workspaceId = socket.data.workspaceId;
     console.log(`📁 Sync-Agent connected for Workspace: ${workspaceId} (Socket: ${socket.id})`);
@@ -340,7 +328,6 @@ io.on('connection', (socket) => {
       const roomName = `workspace:${payload.workspaceId}`;
       console.log(`[Hub] doc-change: ${payload.action} ${payload.docId} in ${payload.workspaceId}`);
       
-      // Reenviar a todos los clientes suscritos al workspace
       io.to(roomName).emit('doc-change', payload);
     });
 
@@ -353,24 +340,18 @@ io.on('connection', (socket) => {
     const uid = socket.data.uid;
     console.log(`👤 Client connected: ${uid} (Socket: ${socket.id})`);
 
-    // Attempt Session Restoration
     if (socket.data.requestedSessionId) {
        const session = sessions.get(socket.data.requestedSessionId);
        if (session && session.ownerUid === uid) {
           console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
           socket.join(socket.data.requestedSessionId);
           
-          socket.emit('session-created', { // Send as session-created to reuse frontend logic or specific restored event
+          socket.emit('session-created', {
              id: socket.data.requestedSessionId,
              workspaceId: session.workspaceId,
              workspaceName: session.workspaceName,
              workspaceType: session.workspaceType
           });
-
-          // Also replay output if we had a buffer (we don't store full buffer currently, only 'output' string in interface but not populated?)
-          // The interface SessionData has 'output: string'. Let's see if it's used.
-          // In 'output' event handler: io.to... emit. It doesn't save to session.output. 
-          // Ideally we should buffer last N lines. But strict requirement is just keeping the connection alive.
        }
     }
 
@@ -387,7 +368,6 @@ io.on('connection', (socket) => {
         workspaceId
       });
       
-      // Send current sessions list
       const activeSessions = Array.from(sessions.entries())
         .filter(([, s]) => s.workspaceId === workspaceId)
         .map(([id, s]) => ({
@@ -513,12 +493,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-      // Don't kill sessions on disconnect to allow persistence
-      // Only log the event
       console.log(`👤 Client disconnected: ${uid}`);
-      
-      // Optional: Set a timeout to clean up abandoned sessions after a long time (e.g. 1 hour)
-      // But for now, we keep them as per user request "sesiones deben ser persistentes"
     });
   }
 });
