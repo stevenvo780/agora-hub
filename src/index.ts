@@ -317,7 +317,31 @@ io.on('connection', (socket) => {
 
   if (role === 'sync-agent') {
     const workspaceId = socket.data.workspaceId;
+    const workspaceType = socket.data.workspaceType;
+    const ownerId = socket.data.ownerId;
     console.log(`📁 Sync-Agent connected for Workspace: ${workspaceId} (Socket: ${socket.id})`);
+
+    // Generate and send custom token
+    (async () => {
+      try {
+        let uidToMint = '';
+        let additionalClaims = {};
+
+        if (workspaceType === 'personal' && ownerId) {
+          uidToMint = ownerId;
+        } else {
+          // For shared workspace, use a service identity
+          uidToMint = `sync-agent:${workspaceId}`;
+          additionalClaims = { workspaceId, role: 'sync-agent' };
+        }
+
+        const token = await admin.auth().createCustomToken(uidToMint, additionalClaims);
+        socket.emit('firebase-custom-token', { token });
+        console.log(`🔑 Sent custom token to sync-agent for ${uidToMint}`);
+      } catch (e) {
+        console.error('Error minting token for sync-agent:', e);
+      }
+    })();
 
     socket.on('doc-change', (payload: { 
       workspaceId: string; 
