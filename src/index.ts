@@ -131,6 +131,7 @@ const sessions = new Map<string, SessionData>();
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
 const WORKER_SECRET = process.env.WORKER_SECRET || 'default-insecure-secret-do-not-use';
+const MAX_HISTORY_BUFFER = 500000; // 500KB buffer per session
 
 // Parse legacy token format (for backward compatibility during migration)
 function parseLegacyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
@@ -350,9 +351,18 @@ io.on('connection', (socket) => {
     socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
       const session = sessions.get(payload.sessionId);
       if (!session || session.workerSocketId !== socket.id) return;
+      
+      const data = payload.output || payload.data || '';
+      
+      // Buffer output for history replay
+      session.output = (session.output || '') + data;
+      if (session.output.length > MAX_HISTORY_BUFFER) {
+        session.output = session.output.slice(-MAX_HISTORY_BUFFER);
+      }
+
       io.to(payload.sessionId).emit('output', {
         sessionId: payload.sessionId,
-        data: payload.output || payload.data || ''
+        data
       });
     });
 
@@ -489,6 +499,15 @@ io.on('connection', (socket) => {
         workspaceName: session.workspaceName,
         workspaceType: session.workspaceType
       });
+
+      // HISTORY REPLAY for restored session
+      if (session.output && session.output.length > 0) {
+        // Send previous history
+        socket.emit('output', {
+          sessionId: sessionId,
+          data: session.output
+        });
+      }
     });
 
     socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared' }) => {
