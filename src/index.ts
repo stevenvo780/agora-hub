@@ -137,11 +137,38 @@ function parseWorkerToken(token: string): { workspaceId: string; workspaceType: 
   return { workspaceId: token, workspaceType: 'shared' };
 }
 
+
+const notifyWorkspaceSessions = (workspaceId: string) => {
+  const activeSessions = Array.from(sessions.values())
+    .filter(s => s.workspaceId === workspaceId)
+    .map(s => ({
+      id: getKeyByValue(sessions, s)!,
+      workspaceId: s.workspaceId,
+      workspaceName: s.workspaceName,
+      workspaceType: s.workspaceType,
+      ownerUid: s.ownerUid
+    }));
+  
+  io.to(`workspace:${workspaceId}`).emit('workspace-sessions', {
+    workspaceId,
+    sessions: activeSessions
+  });
+};
+
+function getKeyByValue<K, V>(map: Map<K, V>, value: V): K | undefined {
+  for (const [key, val] of map.entries()) {
+    if (val === value) return key;
+  }
+  return undefined;
+}
+
 const endSession = (sessionId: string, reason: string) => {
   const session = sessions.get(sessionId);
   if (!session) return;
+  const workspaceId = session.workspaceId;
   sessions.delete(sessionId);
   io.to(sessionId).emit('session-ended', { sessionId, reason });
+  notifyWorkspaceSessions(workspaceId);
 };
 
 const endSessionsByWorker = (workerSocketId: string, reason: string) => {
@@ -359,6 +386,21 @@ io.on('connection', (socket) => {
         status: worker ? 'online' : 'offline',
         workspaceId
       });
+      
+      // Send current sessions list
+      const activeSessions = Array.from(sessions.entries())
+        .filter(([, s]) => s.workspaceId === workspaceId)
+        .map(([id, s]) => ({
+          id,
+          workspaceId: s.workspaceId,
+          workspaceName: s.workspaceName,
+          workspaceType: s.workspaceType,
+          ownerUid: s.ownerUid
+        }));
+      socket.emit('workspace-sessions', {
+        workspaceId,
+        sessions: activeSessions
+      });
     });
 
     socket.on('workspace:unsubscribe', (data: { workspaceId: string }) => {
@@ -435,6 +477,8 @@ io.on('connection', (socket) => {
         id: sessionId,
         workspaceId 
       });
+      
+      notifyWorkspaceSessions(workspaceId);
 
       console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
     });
