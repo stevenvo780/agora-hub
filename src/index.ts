@@ -293,9 +293,12 @@ io.use(async (socket, next) => {
         console.warn(`⚠️ Blocked unauthorized sync-agent connection (Invalid Token)`);
         return next(new Error('Unauthorized: Invalid token'));
       }
-       
+      
+      const { workspaceId, workspaceType, ownerId } = payload;
+      socket.data.workspaceId = workspaceId;
+      socket.data.workspaceType = workspaceType;
+      socket.data.ownerId = ownerId;
       socket.data.role = 'sync-agent';
-      // ... allow connection
             
       return next();
     }
@@ -387,7 +390,9 @@ io.on('connection', (socket) => {
         let additionalClaims = {};
 
         if (workspaceType === 'personal' && ownerId) {
+          // Personal workspace: authenticate as user but with sync-agent claims
           uidToMint = ownerId;
+          additionalClaims = { workspaceId, role: 'sync-agent' };
         } else {
           // For shared workspace, use a service identity
           uidToMint = `sync-agent:${workspaceId}`;
