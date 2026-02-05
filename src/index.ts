@@ -33,8 +33,15 @@ if (!admin.apps.length) {
         try {
           serviceAccount = JSON.parse(serviceAccountRaw) as admin.ServiceAccount;
           console.log('🔑 Loaded credentials from FIREBASE_SERVICE_ACCOUNT env');
-        } catch (parseError) {
-          console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
+        } catch (_parseError) {
+          // Backward-compat: allow base64-encoded JSON
+          try {
+            const decoded = Buffer.from(serviceAccountRaw, 'base64').toString('utf-8');
+            serviceAccount = JSON.parse(decoded) as admin.ServiceAccount;
+            console.log('🔑 Loaded credentials from FIREBASE_SERVICE_ACCOUNT (base64)');
+          } catch (_decodeError) {
+            console.warn('Failed to parse FIREBASE_SERVICE_ACCOUNT, using default credentials.');
+          }
         }
       }
     }
