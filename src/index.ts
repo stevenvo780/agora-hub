@@ -437,16 +437,20 @@ io.on('connection', (socket) => {
 
     if (socket.data.requestedSessionId) {
        const session = sessions.get(socket.data.requestedSessionId);
-       if (session && session.ownerUid === uid) {
-          console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
-          socket.join(socket.data.requestedSessionId);
+       if (session) {
+          const isOwner = session.ownerUid === uid;
+          const isSharedWorkspace = session.workspaceType === 'shared';
+          if (isOwner || isSharedWorkspace) {
+            console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid} (owner: ${isOwner}, shared: ${isSharedWorkspace})`);
+            socket.join(socket.data.requestedSessionId);
           
-          socket.emit('session-created', {
-             id: socket.data.requestedSessionId,
-             workspaceId: session.workspaceId,
-             workspaceName: session.workspaceName,
-             workspaceType: session.workspaceType
-          });
+            socket.emit('session-created', {
+               id: socket.data.requestedSessionId,
+               workspaceId: session.workspaceId,
+               workspaceName: session.workspaceName,
+               workspaceType: session.workspaceType
+            });
+          }
        }
     }
 
@@ -499,8 +503,20 @@ io.on('connection', (socket) => {
       if (!sessionId) return;
 
       const session = sessions.get(sessionId);
-      if (!session || session.ownerUid !== uid) {
-        socket.emit('session-ended', { sessionId, reason: 'restore-failed' });
+      if (!session) {
+        // Session no longer exists on hub (e.g. hub restarted)
+        // Emit restore-failed so the client can handle gracefully without deleting from localStorage immediately
+        socket.emit('restore-failed', { sessionId, reason: 'session-not-found' });
+        return;
+      }
+
+      // For shared workspaces, allow any subscriber to restore/view the session
+      // For personal workspaces, only the owner can restore
+      const isOwner = session.ownerUid === uid;
+      const isSharedWorkspace = session.workspaceType === 'shared';
+
+      if (!isOwner && !isSharedWorkspace) {
+        socket.emit('restore-failed', { sessionId, reason: 'unauthorized' });
         return;
       }
 
@@ -514,7 +530,46 @@ io.on('connection', (socket) => {
 
       // HISTORY REPLAY for restored session
       if (session.output && session.output.length > 0) {
-        // Send previous history
+        socket.emit('output', {
+          sessionId: sessionId,
+          data: session.output
+        });
+      }
+    });
+
+    // Allow users to join an existing session in a shared workspace for live viewing
+    socket.on('join-session', (payload: { sessionId: string }) => {
+      const { sessionId } = payload;
+      if (!sessionId) return;
+
+      const session = sessions.get(sessionId);
+      if (!session) {
+        socket.emit('join-session-failed', { sessionId, reason: 'session-not-found' });
+        return;
+      }
+
+      const isOwner = session.ownerUid === uid;
+      const isSharedWorkspace = session.workspaceType === 'shared';
+
+      // Allow joining if: owner OR shared workspace member
+      if (!isOwner && !isSharedWorkspace) {
+        socket.emit('join-session-failed', { sessionId, reason: 'unauthorized' });
+        return;
+      }
+
+      socket.join(sessionId);
+      console.log(`[Hub] Client ${uid} joined session ${sessionId} (owner: ${isOwner}, shared: ${isSharedWorkspace})`);
+
+      socket.emit('session-joined', {
+        id: sessionId,
+        workspaceId: session.workspaceId,
+        workspaceName: session.workspaceName,
+        workspaceType: session.workspaceType,
+        isOwner
+      });
+
+      // Replay session history for the joining user
+      if (session.output && session.output.length > 0) {
         socket.emit('output', {
           sessionId: sessionId,
           data: session.output
@@ -569,7 +624,11 @@ io.on('connection', (socket) => {
 
     socket.on('execute', (data: { sessionId: string; command: string }) => {
       const session = sessions.get(data.sessionId);
-      if (!session || session.ownerUid !== uid) return;
+      if (!session) return;
+      // Allow execute if owner OR shared workspace member
+      const isOwner = session.ownerUid === uid;
+      const isSharedWorkspace = session.workspaceType === 'shared';
+      if (!isOwner && !isSharedWorkspace) return;
 
       io.to(session.workerSocketId).emit('execute', {
         sessionId: data.sessionId,
@@ -579,7 +638,10 @@ io.on('connection', (socket) => {
 
     socket.on('resize', (data: { sessionId: string; cols: number; rows: number }) => {
       const session = sessions.get(data.sessionId);
-      if (!session || session.ownerUid !== uid) return;
+      if (!session) return;
+      // tmux-like: solo el owner puede redimensionar el PTY
+      // Los viewers tienen su propio grid local via xterm.js
+      if (session.ownerUid !== uid) return;
 
       io.to(session.workerSocketId).emit('resize', {
         sessionId: data.sessionId,
