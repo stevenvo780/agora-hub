@@ -128,6 +128,7 @@ interface SessionData {
   workspaceId: string;
   workspaceName?: string;
   workspaceType: 'personal' | 'shared';
+  sessionName?: string;
   output: string;
 }
 
@@ -189,7 +190,8 @@ const notifyWorkspaceSessions = (workspaceId: string) => {
       workspaceId: s.workspaceId,
       workspaceName: s.workspaceName,
       workspaceType: s.workspaceType,
-      ownerUid: s.ownerUid
+      ownerUid: s.ownerUid,
+      sessionName: s.sessionName
     }));
   
   io.to(`workspace:${workspaceId}`).emit('workspace-sessions', {
@@ -448,7 +450,8 @@ io.on('connection', (socket) => {
                id: socket.data.requestedSessionId,
                workspaceId: session.workspaceId,
                workspaceName: session.workspaceName,
-               workspaceType: session.workspaceType
+               workspaceType: session.workspaceType,
+               sessionName: session.sessionName
             });
           }
        }
@@ -474,7 +477,8 @@ io.on('connection', (socket) => {
           workspaceId: s.workspaceId,
           workspaceName: s.workspaceName,
           workspaceType: s.workspaceType,
-          ownerUid: s.ownerUid
+          ownerUid: s.ownerUid,
+          sessionName: s.sessionName
         }));
       socket.emit('workspace-sessions', {
         workspaceId,
@@ -525,7 +529,8 @@ io.on('connection', (socket) => {
         id: sessionId,
         workspaceId: session.workspaceId,
         workspaceName: session.workspaceName,
-        workspaceType: session.workspaceType
+        workspaceType: session.workspaceType,
+        sessionName: session.sessionName
       });
 
       // HISTORY REPLAY for restored session
@@ -565,6 +570,7 @@ io.on('connection', (socket) => {
         workspaceId: session.workspaceId,
         workspaceName: session.workspaceName,
         workspaceType: session.workspaceType,
+        sessionName: session.sessionName,
         isOwner
       });
 
@@ -577,8 +583,8 @@ io.on('connection', (socket) => {
       }
     });
 
-    socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared' }) => {
-      const { workspaceId, workspaceName, workspaceType = 'shared' } = payload;
+    socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared'; sessionName?: string }) => {
+      const { workspaceId, workspaceName, workspaceType = 'shared', sessionName } = payload;
       
       console.log(`[Hub] create-session request from ${uid} for workspace ${workspaceId}`);
 
@@ -600,6 +606,7 @@ io.on('connection', (socket) => {
         workspaceId,
         workspaceName,
         workspaceType,
+        sessionName: sessionName || undefined,
         output: ''
       });
 
@@ -614,12 +621,33 @@ io.on('connection', (socket) => {
 
       socket.emit('session-created', { 
         id: sessionId,
-        workspaceId 
+        workspaceId,
+        sessionName: sessionName || undefined
       });
       
       notifyWorkspaceSessions(workspaceId);
 
       console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
+    });
+
+    socket.on('rename-session', (payload: { sessionId: string; sessionName: string }) => {
+      const { sessionId, sessionName } = payload;
+      const session = sessions.get(sessionId);
+      if (!session) return;
+
+      // Allow rename if owner or shared workspace
+      const isOwner = session.ownerUid === uid;
+      const isSharedWorkspace = session.workspaceType === 'shared';
+      if (!isOwner && !isSharedWorkspace) return;
+
+      session.sessionName = sessionName;
+      console.log(`[Hub] Session renamed: ${sessionId} -> "${sessionName}" by ${uid}`);
+
+      // Broadcast to all clients in this workspace
+      io.to(`workspace:${session.workspaceId}`).emit('session-renamed', {
+        sessionId,
+        sessionName
+      });
     });
 
     socket.on('execute', (data: { sessionId: string; command: string }) => {
