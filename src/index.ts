@@ -50,7 +50,7 @@ if (!admin.apps.length) {
       const serviceAccountWithProjectId = serviceAccount as ServiceAccountWithProjectId;
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        projectId: process.env.FIREBASE_PROJECT_ID || serviceAccountWithProjectId.project_id,
+        projectId: process.env.FIREBASE_PROJECT_ID || serviceAccountWithProjectId.project_id
       });
     } else {
       admin.initializeApp();
@@ -71,7 +71,7 @@ const CLIENT_ORIGINS = (process.env.CLIENT_ORIGIN || 'http://localhost:3000')
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     if (!origin) return callback(null, true);
-    
+
     try {
       const originUrl = new URL(origin);
       if (CLIENT_ORIGINS.some(allowed => origin === allowed || allowed === originUrl.origin)) {
@@ -80,7 +80,7 @@ const corsOptions = {
     } catch (e) {
       // Invalid origin URL
     }
-    
+
     console.warn(`⚠️ CORS blocked origin: ${origin}`);
     callback(new Error('Not allowed by CORS'));
   },
@@ -98,7 +98,7 @@ if (sslKeyPath && sslCertPath && existsSync(sslKeyPath) && existsSync(sslCertPat
   try {
     const httpsOptions = {
         key: readFileSync(sslKeyPath),
-        cert: readFileSync(sslCertPath),
+        cert: readFileSync(sslCertPath)
     };
     httpServer = createHttpsServer(httpsOptions, app);
     console.log('✅ HTTPS Server Created');
@@ -145,7 +145,7 @@ const MAX_HISTORY_BUFFER = 500000; // 500KB buffer per session
 function parseLegacyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
   // Legacy format: "personal:userId" or "workspaceId"
   if (!token || token.includes('.')) return null; // Not a legacy token if it has a dot (signed format)
-  
+
   if (token.startsWith('personal:')) {
     const ownerId = token.substring('personal:'.length);
     return { workspaceId: token, workspaceType: 'personal', ownerId };
@@ -171,14 +171,14 @@ function verifyWorkerToken(token: string): { workspaceId: string; workspaceType:
   } catch (e) {
     // Continue to legacy fallback
   }
-  
+
   // Fallback to legacy format (TEMPORARY - remove after all workers are updated)
   const legacyParsed = parseLegacyWorkerToken(token);
   if (legacyParsed) {
     console.warn(`⚠️ Legacy token format used for workspace: ${legacyParsed.workspaceId} - Please update worker`);
     return legacyParsed;
   }
-  
+
   return null;
 }
 
@@ -193,7 +193,7 @@ const notifyWorkspaceSessions = (workspaceId: string) => {
       ownerUid: s.ownerUid,
       sessionName: s.sessionName
     }));
-  
+
   io.to(`workspace:${workspaceId}`).emit('workspace-sessions', {
     workspaceId,
     sessions: activeSessions
@@ -269,11 +269,11 @@ io.use(async (socket, next) => {
         console.error('Token verification failed:', e);
         return next(new Error('Authentication failed'));
       }
-      
+
       socket.data.role = 'client';
       return next();
-    } 
-    
+    }
+
     if (type === 'worker') {
       if (!workerToken) return next(new Error('Missing worker token'));
 
@@ -282,13 +282,13 @@ io.use(async (socket, next) => {
         console.warn(`⚠️ Invalid worker token signature`);
         return next(new Error('Unauthorized: Invalid token'));
       }
-      
+
       const { workspaceId, workspaceType, ownerId } = payload;
       socket.data.workspaceId = workspaceId;
       socket.data.workspaceType = workspaceType;
       socket.data.ownerId = ownerId;
       socket.data.role = 'worker';
-      
+
       return next();
     }
 
@@ -297,18 +297,18 @@ io.use(async (socket, next) => {
 
       // Reusing verifyWorkerToken instead of raw secret check
       const payload = verifyWorkerToken(workerToken);
-      
+
       if (!payload) {
         console.warn(`⚠️ Blocked unauthorized sync-agent connection (Invalid Token)`);
         return next(new Error('Unauthorized: Invalid token'));
       }
-      
+
       const { workspaceId, workspaceType, ownerId } = payload;
       socket.data.workspaceId = workspaceId;
       socket.data.workspaceType = workspaceType;
       socket.data.ownerId = ownerId;
       socket.data.role = 'sync-agent';
-            
+
       return next();
     }
 
@@ -347,7 +347,7 @@ io.on('connection', (socket) => {
     });
 
     console.log(`✅ Worker registered for Workspace: ${workspaceId} [Type: ${workspaceType}]`);
-    
+
     notifyWorkspaceStatus(workspaceId, 'online');
 
     socket.on('disconnect', () => {
@@ -363,9 +363,9 @@ io.on('connection', (socket) => {
     socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
       const session = sessions.get(payload.sessionId);
       if (!session || session.workerSocketId !== socket.id) return;
-      
+
       const data = payload.output || payload.data || '';
-      
+
       // Buffer output for history replay
       session.output = (session.output || '') + data;
       if (session.output.length > MAX_HISTORY_BUFFER) {
@@ -416,15 +416,15 @@ io.on('connection', (socket) => {
       }
     })();
 
-    socket.on('doc-change', (payload: { 
-      workspaceId: string; 
-      docId: string; 
+    socket.on('doc-change', (payload: {
+      workspaceId: string;
+      docId: string;
       action: 'created' | 'updated' | 'deleted';
       data?: { name?: string; parentId?: string | null };
     }) => {
       const roomName = `workspace:${payload.workspaceId}`;
       console.log(`[Hub] doc-change: ${payload.action} ${payload.docId} in ${payload.workspaceId}`);
-      
+
       io.to(roomName).emit('doc-change', payload);
     });
 
@@ -445,7 +445,7 @@ io.on('connection', (socket) => {
           if (isOwner || isSharedWorkspace) {
             console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid} (owner: ${isOwner}, shared: ${isSharedWorkspace})`);
             socket.join(socket.data.requestedSessionId);
-          
+
             socket.emit('session-created', {
                id: socket.data.requestedSessionId,
                workspaceId: session.workspaceId,
@@ -460,7 +460,7 @@ io.on('connection', (socket) => {
     socket.on('workspace:subscribe', (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const roomName = `workspace:${workspaceId}`;
-      
+
       socket.join(roomName);
       console.log(`[Hub] Client ${uid} subscribed to ${roomName}`);
 
@@ -469,7 +469,7 @@ io.on('connection', (socket) => {
         status: worker ? 'online' : 'offline',
         workspaceId
       });
-      
+
       const activeSessions = Array.from(sessions.entries())
         .filter(([, s]) => s.workspaceId === workspaceId)
         .map(([id, s]) => ({
@@ -536,7 +536,7 @@ io.on('connection', (socket) => {
       // HISTORY REPLAY for restored session
       if (session.output && session.output.length > 0) {
         socket.emit('output', {
-          sessionId: sessionId,
+          sessionId,
           data: session.output
         });
       }
@@ -577,7 +577,7 @@ io.on('connection', (socket) => {
       // Replay session history for the joining user
       if (session.output && session.output.length > 0) {
         socket.emit('output', {
-          sessionId: sessionId,
+          sessionId,
           data: session.output
         });
       }
@@ -585,21 +585,21 @@ io.on('connection', (socket) => {
 
     socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared'; sessionName?: string }) => {
       const { workspaceId, workspaceName, workspaceType = 'shared', sessionName } = payload;
-      
+
       console.log(`[Hub] create-session request from ${uid} for workspace ${workspaceId}`);
 
       const worker = workersByWorkspace.get(workspaceId);
-      
+
       if (!worker) {
         console.log(`[Hub] No worker found for workspace ${workspaceId}`);
-        return socket.emit('error', { 
+        return socket.emit('error', {
           message: `No hay worker conectado para este espacio de trabajo`,
-          workspaceId 
+          workspaceId
         });
       }
 
       const sessionId = `sess_${workspaceId.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
-      
+
       sessions.set(sessionId, {
         ownerUid: uid,
         workerSocketId: worker.socketId,
@@ -619,12 +619,12 @@ io.on('connection', (socket) => {
         workspaceType
       });
 
-      socket.emit('session-created', { 
+      socket.emit('session-created', {
         id: sessionId,
         workspaceId,
         sessionName: sessionName || undefined
       });
-      
+
       notifyWorkspaceSessions(workspaceId);
 
       console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
@@ -681,7 +681,7 @@ io.on('connection', (socket) => {
     socket.on('kill-session', (data: { sessionId: string }) => {
       const session = sessions.get(data.sessionId);
       if (!session || session.ownerUid !== uid) return;
-      
+
       io.to(session.workerSocketId).emit('kill-session', { sessionId: data.sessionId });
       endSession(data.sessionId, 'user-terminated');
     });
@@ -723,7 +723,7 @@ app.get('/status', async (req, res) => {
     ownerId: info.ownerId,
     connected: info.socket.connected
   }));
-  
+
   const activeSessions = Array.from(sessions.entries()).map(([id, session]) => ({
     sessionId: id,
     workspaceId: session.workspaceId,
