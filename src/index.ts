@@ -138,8 +138,49 @@ const sessions = new Map<string, SessionData>();
 
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
-const WORKER_SECRET = process.env.WORKER_SECRET || 'default-insecure-secret-do-not-use';
+const WORKER_SECRET = (process.env.WORKER_SECRET || '').trim();
+const ALLOW_LEGACY_WORKER_TOKENS = process.env.ALLOW_LEGACY_WORKER_TOKENS === 'true';
+const WORKER_TOKEN_MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_HISTORY_BUFFER = 500000; // 500KB buffer per session
+const PERSONAL_WORKSPACE_PREFIX = 'personal:';
+
+if (!WORKER_SECRET) {
+  console.error('WORKER_SECRET is required.');
+  process.exit(1);
+}
+
+const isPersonalWorkspaceToken = (workspaceId: string) => workspaceId.startsWith(PERSONAL_WORKSPACE_PREFIX);
+
+const getPersonalWorkspaceOwnerId = (workspaceId: string) =>
+  isPersonalWorkspaceToken(workspaceId) ? workspaceId.slice(PERSONAL_WORKSPACE_PREFIX.length) : null;
+
+const getWorkspaceTypeFromId = (workspaceId: string): 'personal' | 'shared' =>
+  isPersonalWorkspaceToken(workspaceId) ? 'personal' : 'shared';
+
+const canUserAccessWorkspace = async (workspaceId: string, uid: string): Promise<boolean> => {
+  if (!workspaceId || !uid) return false;
+  if (isPersonalWorkspaceToken(workspaceId)) {
+    return getPersonalWorkspaceOwnerId(workspaceId) === uid;
+  }
+
+  const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
+  if (!snap.exists) return false;
+  const data = snap.data() as { members?: unknown } | undefined;
+  return Array.isArray(data?.members) && data.members.includes(uid);
+};
+
+const canUserAccessSession = async (session: SessionData, uid: string): Promise<boolean> => {
+  if (session.ownerUid === uid) return true;
+  return canUserAccessWorkspace(session.workspaceId, uid);
+};
+
+const isAdminUser = async (uid: string): Promise<boolean> => {
+  if (!uid) return false;
+  const snap = await admin.firestore().collection('users').doc(uid).get();
+  if (!snap.exists) return false;
+  const data = snap.data() as { role?: unknown } | undefined;
+  return typeof data?.role === 'string' && ['admin', 'superadmin'].includes(data.role.toLowerCase());
+};
 
 // Parse legacy token format (for backward compatibility during migration)
 function parseLegacyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
@@ -154,7 +195,6 @@ function parseLegacyWorkerToken(token: string): { workspaceId: string; workspace
 }
 
 function verifyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
-  // First try signed token format
   try {
     const [payloadB64, signature] = token.split('.');
     if (payloadB64 && signature) {
@@ -164,15 +204,38 @@ function verifyWorkerToken(token: string): { workspaceId: string; workspaceType:
         .digest('hex');
 
       if (signature === expectedSignature) {
-        const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8'));
-        return payload; // { workspaceId, workspaceType, ownerId, timestamp? }
+        const payload = JSON.parse(Buffer.from(payloadB64, 'base64').toString('utf-8')) as {
+          workspaceId?: unknown;
+          workspaceType?: unknown;
+          ownerId?: unknown;
+          timestamp?: unknown;
+        };
+        if (typeof payload.workspaceId !== 'string' || !payload.workspaceId.trim()) return null;
+
+        const workspaceId = payload.workspaceId.trim();
+        const workspaceType = getWorkspaceTypeFromId(workspaceId);
+        const ownerId = typeof payload.ownerId === 'string' && payload.ownerId.trim()
+          ? payload.ownerId.trim()
+          : undefined;
+        const personalOwnerId = getPersonalWorkspaceOwnerId(workspaceId);
+        if (workspaceType === 'personal' && ownerId !== personalOwnerId) return null;
+        if (payload.workspaceType !== workspaceType) return null;
+        if (typeof payload.timestamp !== 'number' || !Number.isFinite(payload.timestamp)) return null;
+
+        const ageMs = Date.now() - payload.timestamp;
+        if (ageMs < -10_000 || ageMs > WORKER_TOKEN_MAX_AGE_MS) return null;
+
+        return { workspaceId, workspaceType, ownerId };
       }
     }
   } catch (e) {
-    // Continue to legacy fallback
+    return null;
   }
 
-  // Fallback to legacy format (TEMPORARY - remove after all workers are updated)
+  if (!ALLOW_LEGACY_WORKER_TOKENS) {
+    return null;
+  }
+
   const legacyParsed = parseLegacyWorkerToken(token);
   if (legacyParsed) {
     console.warn(`⚠️ Legacy token format used for workspace: ${legacyParsed.workspaceId} - Please update worker`);
@@ -438,27 +501,33 @@ io.on('connection', (socket) => {
     console.log(`👤 Client connected: ${uid} (Socket: ${socket.id})`);
 
     if (socket.data.requestedSessionId) {
-       const session = sessions.get(socket.data.requestedSessionId);
-       if (session) {
-          const isOwner = session.ownerUid === uid;
-          const isSharedWorkspace = session.workspaceType === 'shared';
-          if (isOwner || isSharedWorkspace) {
-            console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid} (owner: ${isOwner}, shared: ${isSharedWorkspace})`);
-            socket.join(socket.data.requestedSessionId);
+      void (async () => {
+        const session = sessions.get(socket.data.requestedSessionId);
+        if (!session) return;
 
-            socket.emit('session-created', {
-               id: socket.data.requestedSessionId,
-               workspaceId: session.workspaceId,
-               workspaceName: session.workspaceName,
-               workspaceType: session.workspaceType,
-               sessionName: session.sessionName
-            });
-          }
-       }
+        const allowed = await canUserAccessSession(session, uid);
+        if (!allowed) return;
+
+        console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
+        socket.join(socket.data.requestedSessionId);
+
+        socket.emit('session-created', {
+          id: socket.data.requestedSessionId,
+          workspaceId: session.workspaceId,
+          workspaceName: session.workspaceName,
+          workspaceType: session.workspaceType,
+          sessionName: session.sessionName
+        });
+      })();
     }
 
-    socket.on('workspace:subscribe', (data: { workspaceId: string }) => {
+    socket.on('workspace:subscribe', async (data: { workspaceId: string }) => {
       const { workspaceId } = data;
+      if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+        socket.emit('error', { message: 'No autorizado para este espacio', workspaceId });
+        return;
+      }
+
       const roomName = `workspace:${workspaceId}`;
 
       socket.join(roomName);
@@ -493,8 +562,13 @@ io.on('connection', (socket) => {
       console.log(`[Hub] Client ${uid} unsubscribed from ${roomName}`);
     });
 
-    socket.on('workspace:check-worker', (data: { workspaceId: string }) => {
+    socket.on('workspace:check-worker', async (data: { workspaceId: string }) => {
       const { workspaceId } = data;
+      if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+        socket.emit('error', { message: 'No autorizado para este espacio', workspaceId });
+        return;
+      }
+
       const worker = workersByWorkspace.get(workspaceId);
       socket.emit('worker-status', {
         status: worker ? 'online' : 'offline',
@@ -502,7 +576,7 @@ io.on('connection', (socket) => {
       });
     });
 
-    socket.on('restore-session', (payload: { sessionId?: string }) => {
+    socket.on('restore-session', async (payload: { sessionId?: string }) => {
       const sessionId = payload?.sessionId;
       if (!sessionId) return;
 
@@ -514,12 +588,8 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // For shared workspaces, allow any subscriber to restore/view the session
-      // For personal workspaces, only the owner can restore
-      const isOwner = session.ownerUid === uid;
-      const isSharedWorkspace = session.workspaceType === 'shared';
-
-      if (!isOwner && !isSharedWorkspace) {
+      const allowed = await canUserAccessSession(session, uid);
+      if (!allowed) {
         socket.emit('restore-failed', { sessionId, reason: 'unauthorized' });
         return;
       }
@@ -543,7 +613,7 @@ io.on('connection', (socket) => {
     });
 
     // Allow users to join an existing session in a shared workspace for live viewing
-    socket.on('join-session', (payload: { sessionId: string }) => {
+    socket.on('join-session', async (payload: { sessionId: string }) => {
       const { sessionId } = payload;
       if (!sessionId) return;
 
@@ -554,16 +624,14 @@ io.on('connection', (socket) => {
       }
 
       const isOwner = session.ownerUid === uid;
-      const isSharedWorkspace = session.workspaceType === 'shared';
-
-      // Allow joining if: owner OR shared workspace member
-      if (!isOwner && !isSharedWorkspace) {
+      const allowed = await canUserAccessSession(session, uid);
+      if (!allowed) {
         socket.emit('join-session-failed', { sessionId, reason: 'unauthorized' });
         return;
       }
 
       socket.join(sessionId);
-      console.log(`[Hub] Client ${uid} joined session ${sessionId} (owner: ${isOwner}, shared: ${isSharedWorkspace})`);
+      console.log(`[Hub] Client ${uid} joined session ${sessionId} (owner: ${isOwner})`);
 
       socket.emit('session-joined', {
         id: sessionId,
@@ -583,10 +651,17 @@ io.on('connection', (socket) => {
       }
     });
 
-    socket.on('create-session', (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared'; sessionName?: string }) => {
-      const { workspaceId, workspaceName, workspaceType = 'shared', sessionName } = payload;
+    socket.on('create-session', async (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared'; sessionName?: string }) => {
+      const { workspaceId, workspaceName, sessionName } = payload;
 
       console.log(`[Hub] create-session request from ${uid} for workspace ${workspaceId}`);
+
+      if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+        return socket.emit('error', {
+          message: 'No autorizado para este espacio de trabajo',
+          workspaceId
+        });
+      }
 
       const worker = workersByWorkspace.get(workspaceId);
 
@@ -605,7 +680,7 @@ io.on('connection', (socket) => {
         workerSocketId: worker.socketId,
         workspaceId,
         workspaceName,
-        workspaceType,
+        workspaceType: getWorkspaceTypeFromId(workspaceId),
         sessionName: sessionName || undefined,
         output: ''
       });
@@ -616,7 +691,7 @@ io.on('connection', (socket) => {
         id: sessionId,
         workspaceId,
         workspaceName,
-        workspaceType
+        workspaceType: getWorkspaceTypeFromId(workspaceId)
       });
 
       socket.emit('session-created', {
@@ -630,15 +705,16 @@ io.on('connection', (socket) => {
       console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
     });
 
-    socket.on('rename-session', (payload: { sessionId: string; sessionName: string }) => {
+    socket.on('rename-session', async (payload: { sessionId: string; sessionName: string }) => {
       const { sessionId, sessionName } = payload;
       const session = sessions.get(sessionId);
       if (!session) return;
 
-      // Allow rename if owner or shared workspace
       const isOwner = session.ownerUid === uid;
-      const isSharedWorkspace = session.workspaceType === 'shared';
-      if (!isOwner && !isSharedWorkspace) return;
+      const canCollaborate = session.workspaceType === 'shared'
+        && socket.rooms.has(sessionId)
+        && await canUserAccessSession(session, uid);
+      if (!isOwner && !canCollaborate) return;
 
       session.sessionName = sessionName;
       console.log(`[Hub] Session renamed: ${sessionId} -> "${sessionName}" by ${uid}`);
@@ -650,13 +726,15 @@ io.on('connection', (socket) => {
       });
     });
 
-    socket.on('execute', (data: { sessionId: string; command: string }) => {
+    socket.on('execute', async (data: { sessionId: string; command: string }) => {
       const session = sessions.get(data.sessionId);
       if (!session) return;
-      // Allow execute if owner OR shared workspace member
+
       const isOwner = session.ownerUid === uid;
-      const isSharedWorkspace = session.workspaceType === 'shared';
-      if (!isOwner && !isSharedWorkspace) return;
+      const canCollaborate = session.workspaceType === 'shared'
+        && socket.rooms.has(data.sessionId)
+        && await canUserAccessSession(session, uid);
+      if (!isOwner && !canCollaborate) return;
 
       io.to(session.workerSocketId).emit('execute', {
         sessionId: data.sessionId,
@@ -705,11 +783,10 @@ app.get('/status', async (req, res) => {
 
   const token = authHeader.split(' ')[1];
   try {
-     // Verify idToken or a special admin token
-     // Here we re-use firebase admin to verify it's a valid user
      const decoded = await admin.auth().verifyIdToken(token);
-     // Optional: check if user is admin
-     // if (!decoded.admin) return res.status(403).json({ error: 'Forbidden' });
+     if (!(await isAdminUser(decoded.uid))) {
+       return res.status(403).json({ error: 'Forbidden' });
+     }
      console.log(`🔎 Status checked by ${decoded.uid}`);
   } catch (e) {
      console.warn('Status endpoint auth failed');
