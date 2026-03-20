@@ -129,12 +129,16 @@ interface SessionData {
   workspaceName?: string;
   workspaceType: 'personal' | 'shared';
   sessionName?: string;
-  output: string;
+  outputChunks: string[];
+  outputSize: number;
 }
 
 const workersByWorkspace = new Map<string, WorkerInfo>();
 
 const sessions = new Map<string, SessionData>();
+
+// Reverse index: workerSocketId → Set<sessionId> for O(1) lookup on worker disconnect
+const sessionsByWorker = new Map<string, Set<string>>();
 
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
@@ -157,16 +161,24 @@ const getPersonalWorkspaceOwnerId = (workspaceId: string) =>
 const getWorkspaceTypeFromId = (workspaceId: string): 'personal' | 'shared' =>
   isPersonalWorkspaceToken(workspaceId) ? 'personal' : 'shared';
 
+const WORKSPACE_ACCESS_CACHE_TTL = 60_000;
+const workspaceAccessCache = new Map<string, { result: boolean; expiresAt: number }>();
+
 const canUserAccessWorkspace = async (workspaceId: string, uid: string): Promise<boolean> => {
   if (!workspaceId || !uid) return false;
   if (isPersonalWorkspaceToken(workspaceId)) {
     return getPersonalWorkspaceOwnerId(workspaceId) === uid;
   }
 
+  const cacheKey = `${workspaceId}:${uid}`;
+  const cached = workspaceAccessCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.result;
+
   const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
-  if (!snap.exists) return false;
-  const data = snap.data() as { members?: unknown } | undefined;
-  return Array.isArray(data?.members) && data.members.includes(uid);
+  const result = snap.exists && Array.isArray((snap.data() as { members?: unknown } | undefined)?.members)
+    && (snap.data() as { members: unknown[] }).members.includes(uid);
+  workspaceAccessCache.set(cacheKey, { result, expiresAt: Date.now() + WORKSPACE_ACCESS_CACHE_TTL });
+  return result;
 };
 
 const canUserAccessSession = async (session: SessionData, uid: string): Promise<boolean> => {
@@ -246,10 +258,10 @@ function verifyWorkerToken(token: string): { workspaceId: string; workspaceType:
 }
 
 const notifyWorkspaceSessions = (workspaceId: string) => {
-  const activeSessions = Array.from(sessions.values())
-    .filter(s => s.workspaceId === workspaceId)
-    .map(s => ({
-      id: getKeyByValue(sessions, s)!,
+  const activeSessions = Array.from(sessions.entries())
+    .filter(([, s]) => s.workspaceId === workspaceId)
+    .map(([id, s]) => ({
+      id,
       workspaceId: s.workspaceId,
       workspaceName: s.workspaceName,
       workspaceType: s.workspaceType,
@@ -263,27 +275,26 @@ const notifyWorkspaceSessions = (workspaceId: string) => {
   });
 };
 
-function getKeyByValue<K, V>(map: Map<K, V>, value: V): K | undefined {
-  for (const [key, val] of map.entries()) {
-    if (val === value) return key;
-  }
-  return undefined;
-}
-
 const endSession = (sessionId: string, reason: string) => {
   const session = sessions.get(sessionId);
   if (!session) return;
   const workspaceId = session.workspaceId;
   sessions.delete(sessionId);
+  // Maintain reverse index
+  const workerSessions = sessionsByWorker.get(session.workerSocketId);
+  if (workerSessions) {
+    workerSessions.delete(sessionId);
+    if (workerSessions.size === 0) sessionsByWorker.delete(session.workerSocketId);
+  }
   io.to(sessionId).emit('session-ended', { sessionId, reason });
   notifyWorkspaceSessions(workspaceId);
 };
 
 const endSessionsByWorker = (workerSocketId: string, reason: string) => {
-  for (const [sessionId, session] of sessions.entries()) {
-    if (session.workerSocketId === workerSocketId) {
-      endSession(sessionId, reason);
-    }
+  const workerSessions = sessionsByWorker.get(workerSocketId);
+  if (!workerSessions) return;
+  for (const sessionId of [...workerSessions]) {
+    endSession(sessionId, reason);
   }
 };
 
@@ -429,10 +440,12 @@ io.on('connection', (socket) => {
 
       const data = payload.output || payload.data || '';
 
-      // Buffer output for history replay
-      session.output = (session.output || '') + data;
-      if (session.output.length > MAX_HISTORY_BUFFER) {
-        session.output = session.output.slice(-MAX_HISTORY_BUFFER);
+      // Buffer output for history replay (ring buffer to avoid GC pressure)
+      session.outputChunks.push(data);
+      session.outputSize += data.length;
+      while (session.outputSize > MAX_HISTORY_BUFFER) {
+        const removed = session.outputChunks.shift()!;
+        session.outputSize -= removed.length;
       }
 
       io.to(payload.sessionId).emit('output', {
@@ -604,10 +617,10 @@ io.on('connection', (socket) => {
       });
 
       // HISTORY REPLAY for restored session
-      if (session.output && session.output.length > 0) {
+      if (session.outputChunks.length > 0) {
         socket.emit('output', {
           sessionId,
-          data: session.output
+          data: session.outputChunks.join('')
         });
       }
     });
@@ -643,10 +656,10 @@ io.on('connection', (socket) => {
       });
 
       // Replay session history for the joining user
-      if (session.output && session.output.length > 0) {
+      if (session.outputChunks.length > 0) {
         socket.emit('output', {
           sessionId,
-          data: session.output
+          data: session.outputChunks.join('')
         });
       }
     });
@@ -682,8 +695,13 @@ io.on('connection', (socket) => {
         workspaceName,
         workspaceType: getWorkspaceTypeFromId(workspaceId),
         sessionName: sessionName || undefined,
-        output: ''
+        outputChunks: [],
+        outputSize: 0
       });
+      // Maintain reverse index
+      const workerSessions = sessionsByWorker.get(worker.socketId) ?? new Set<string>();
+      workerSessions.add(sessionId);
+      sessionsByWorker.set(worker.socketId, workerSessions);
 
       socket.join(sessionId);
 
