@@ -468,8 +468,8 @@ io.on('connection', (socket) => {
     const ownerId = socket.data.ownerId;
     console.log(`📁 Sync-Agent connected for Workspace: ${workspaceId} (Socket: ${socket.id})`);
 
-    // Generate and send custom token
-    (async () => {
+    // Helper: mint and send a Firebase custom token to the sync-agent
+    const mintAndSendToken = async () => {
       try {
         let uidToMint = '';
         let additionalClaims = {};
@@ -490,7 +490,16 @@ io.on('connection', (socket) => {
       } catch (e) {
         console.error('Error minting token for sync-agent:', e);
       }
-    })();
+    };
+
+    // Send initial token
+    void mintAndSendToken();
+
+    // Re-auth: sync-agent requests a new token when the previous one expires
+    socket.on('request-firebase-token', () => {
+      console.log(`🔑 Sync-Agent requesting token refresh for ${workspaceId}`);
+      void mintAndSendToken();
+    });
 
     socket.on('doc-change', (payload: {
       workspaceId: string;
