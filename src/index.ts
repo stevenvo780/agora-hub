@@ -531,7 +531,7 @@ io.on('connection', (socket) => {
         if (!allowed) return;
 
         console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
-        socket.join(socket.data.requestedSessionId);
+        await socket.join(socket.data.requestedSessionId);
 
         socket.emit('session-created', {
           id: socket.data.requestedSessionId,
@@ -552,7 +552,7 @@ io.on('connection', (socket) => {
 
       const roomName = `workspace:${workspaceId}`;
 
-      socket.join(roomName);
+      await socket.join(roomName);
       console.log(`[Hub] Client ${uid} subscribed to ${roomName}`);
 
       const worker = workersByWorkspace.get(workspaceId);
@@ -577,10 +577,10 @@ io.on('connection', (socket) => {
       });
     });
 
-    socket.on('workspace:unsubscribe', (data: { workspaceId: string }) => {
+    socket.on('workspace:unsubscribe', async (data: { workspaceId: string }) => {
       const { workspaceId } = data;
       const roomName = `workspace:${workspaceId}`;
-      socket.leave(roomName);
+      await socket.leave(roomName);
       console.log(`[Hub] Client ${uid} unsubscribed from ${roomName}`);
     });
 
@@ -616,7 +616,7 @@ io.on('connection', (socket) => {
         return;
       }
 
-      socket.join(sessionId);
+      await socket.join(sessionId);
       socket.emit('session-created', {
         id: sessionId,
         workspaceId: session.workspaceId,
@@ -652,7 +652,7 @@ io.on('connection', (socket) => {
         return;
       }
 
-      socket.join(sessionId);
+      await socket.join(sessionId);
       console.log(`[Hub] Client ${uid} joined session ${sessionId} (owner: ${isOwner})`);
 
       socket.emit('session-joined', {
@@ -712,7 +712,7 @@ io.on('connection', (socket) => {
       workerSessions.add(sessionId);
       sessionsByWorker.set(worker.socketId, workerSessions);
 
-      socket.join(sessionId);
+      await socket.join(sessionId);
 
       io.to(worker.socketId).emit('session-created', {
         id: sessionId,
