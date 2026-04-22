@@ -13,6 +13,16 @@ PY
 BUILD_DIR="$ROOT_DIR/build/deb"
 DIST_DIR="$ROOT_DIR/dist"
 STAGE_DIR="$ROOT_DIR/build/stage"
+HUB_ENV_SOURCE="$ROOT_DIR/packaging/hub.env"
+HUB_ENV_EXAMPLE="$ROOT_DIR/packaging/hub.env.example"
+
+if [ -f "$HUB_ENV_SOURCE" ]; then
+  HUB_ENV_FILE="$HUB_ENV_SOURCE"
+else
+  HUB_ENV_FILE="$HUB_ENV_EXAMPLE"
+  echo "⚠️  packaging/hub.env no existe; se empaquetará hub.env.example como placeholder local."
+  echo "   En producción se conservará /etc/edu-hub/hub.env si ya existe gracias a --force-confold."
+fi
 
 rm -rf "$BUILD_DIR" "$STAGE_DIR"
 mkdir -p "$BUILD_DIR/DEBIAN" \
@@ -41,8 +51,8 @@ cp "$ROOT_DIR/package.json" "$BUILD_DIR/opt/edu-hub/"
 cp -r "$STAGE_DIR/node_modules" "$BUILD_DIR/opt/edu-hub/node_modules"
 
 install -m 644 "$ROOT_DIR/packaging/edu-hub.service" "$BUILD_DIR/lib/systemd/system/edu-hub.service"
-install -m 644 "$ROOT_DIR/packaging/hub.env" "$BUILD_DIR/etc/edu-hub/hub.env"
-install -m 644 "$ROOT_DIR/packaging/hub.env" "$BUILD_DIR/usr/share/doc/edu-hub/hub.env.example"
+install -m 644 "$HUB_ENV_FILE" "$BUILD_DIR/etc/edu-hub/hub.env"
+install -m 644 "$HUB_ENV_EXAMPLE" "$BUILD_DIR/usr/share/doc/edu-hub/hub.env.example"
 
 cat > "$BUILD_DIR/DEBIAN/control" << EOF
 Package: edu-hub
