@@ -890,6 +890,27 @@ app.get('/agent/workspace-status', async (req, res) => {
   });
 });
 
+/**
+ * Rate limit deslizante por workspace para `/agent/run-command`. Evita que un
+ * agente saturado dispare 50 comandos seguidos en un worker.
+ */
+const AGENT_CMD_WINDOW_MS = 30_000;
+const AGENT_CMD_MAX_PER_WINDOW = 8;
+const agentCommandHistory = new Map<string, number[]>();
+
+function checkAgentCommandRateLimit(workspaceId: string): { ok: boolean; retryAfterMs: number } {
+  const now = Date.now();
+  const arr = agentCommandHistory.get(workspaceId) ?? [];
+  const recent = arr.filter((t) => now - t < AGENT_CMD_WINDOW_MS);
+  if (recent.length >= AGENT_CMD_MAX_PER_WINDOW) {
+    const earliest = recent[0]!;
+    return { ok: false, retryAfterMs: AGENT_CMD_WINDOW_MS - (now - earliest) };
+  }
+  recent.push(now);
+  agentCommandHistory.set(workspaceId, recent);
+  return { ok: true, retryAfterMs: 0 };
+}
+
 app.post('/agent/run-command', async (req, res) => {
   const decoded = await authenticateHttpUser(req, res);
   if (!decoded) return;
@@ -902,6 +923,13 @@ app.post('/agent/run-command', async (req, res) => {
 
   if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, decoded.uid))) {
     return res.status(403).json({ error: 'Forbidden' });
+  }
+  const rl = checkAgentCommandRateLimit(workspaceId);
+  if (!rl.ok) {
+    res.setHeader('Retry-After', String(Math.ceil(rl.retryAfterMs / 1000)));
+    return res.status(429).json({
+      error: `Rate limit: máximo ${AGENT_CMD_MAX_PER_WINDOW} comandos cada ${AGENT_CMD_WINDOW_MS / 1000}s por workspace.`
+    });
   }
   if (!command.trim()) {
     return res.status(400).json({ error: 'command required' });
