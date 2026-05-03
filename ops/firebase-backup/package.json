@@ -1,0 +1,16 @@
+{
+  "name": "agora-firebase-backup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Defensive full backup of Firebase (Firestore + Storage + RTDB + Auth) to a local destination, idempotent and verifiable by SHA-256.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "backup": "node backup.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}

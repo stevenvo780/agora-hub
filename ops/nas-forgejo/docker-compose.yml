@@ -1,0 +1,43 @@
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:10
+    container_name: agora-forgejo
+    restart: unless-stopped
+    environment:
+      USER_UID: ${FORGEJO_UID:-1000}
+      USER_GID: ${FORGEJO_GID:-1000}
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: ${FORGEJO_DB_HOST:?required}
+      FORGEJO__database__NAME: ${FORGEJO_DB_NAME:?required}
+      FORGEJO__database__USER: ${FORGEJO_DB_USER:?required}
+      FORGEJO__database__PASSWD: ${FORGEJO_DB_PASSWORD:?required}
+      FORGEJO__server__DOMAIN: ${FORGEJO_DOMAIN:-git.proxy.humanizar-dev.cloud}
+      FORGEJO__server__ROOT_URL: ${FORGEJO_ROOT_URL:-https://git.proxy.humanizar-dev.cloud/}
+      FORGEJO__server__SSH_DOMAIN: ${FORGEJO_SSH_DOMAIN:-git.proxy.humanizar-dev.cloud}
+      FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT:-2222}
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "true"
+      FORGEJO__security__INSTALL_LOCK: "true"
+    volumes:
+      - ../data:/var/lib/gitea
+      - ../config:/etc/gitea
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${FORGEJO_BIND_ADDR:-100.98.67.189}:3000:3000"
+      - "${FORGEJO_BIND_ADDR:-100.98.67.189}:2222:22"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  default:
+    name: agora-git
