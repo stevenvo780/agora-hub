@@ -88,6 +88,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
 
 let httpServer;
 const sslKeyPath = process.env.SSL_KEY_PATH;
@@ -133,12 +134,34 @@ interface SessionData {
   outputSize: number;
 }
 
+interface AgentCommandResultPayload {
+  requestId: string;
+  workspaceId: string;
+  ok: boolean;
+  command: string;
+  cwd: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal?: string | null;
+  timedOut?: boolean;
+  durationMs: number;
+}
+
 const workersByWorkspace = new Map<string, WorkerInfo>();
 
 const sessions = new Map<string, SessionData>();
 
 // Reverse index: workerSocketId → Set<sessionId> for O(1) lookup on worker disconnect
 const sessionsByWorker = new Map<string, Set<string>>();
+
+const pendingAgentCommands = new Map<string, {
+  workspaceId: string;
+  workerSocketId: string;
+  resolve: (payload: AgentCommandResultPayload) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}>();
 
 const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 const STATUS_DEBOUNCE_MS = 2000;
@@ -193,6 +216,33 @@ const isAdminUser = async (uid: string): Promise<boolean> => {
   const data = snap.data() as { role?: unknown } | undefined;
   return typeof data?.role === 'string' && ['admin', 'superadmin'].includes(data.role.toLowerCase());
 };
+
+const authenticateHttpUser = async (req: express.Request, res: express.Response): Promise<admin.auth.DecodedIdToken | null> => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!token) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return null;
+  }
+  try {
+    return await admin.auth().verifyIdToken(token);
+  } catch (_error) {
+    res.status(403).json({ error: 'Forbidden' });
+    return null;
+  }
+};
+
+const getWorkspaceSessions = (workspaceId: string) => (
+  Array.from(sessions.entries())
+    .filter(([, session]) => session.workspaceId === workspaceId)
+    .map(([sessionId, session]) => ({
+      sessionId,
+      workspaceId: session.workspaceId,
+      workspaceType: session.workspaceType,
+      ownerUid: session.ownerUid,
+      sessionName: session.sessionName
+    }))
+);
 
 // Parse legacy token format (for backward compatibility during migration)
 function parseLegacyWorkerToken(token: string): { workspaceId: string; workspaceType: 'personal' | 'shared'; ownerId?: string } | null {
@@ -459,6 +509,16 @@ io.on('connection', (socket) => {
       if (session && session.workerSocketId === socket.id) {
         endSession(payload.sessionId, payload.reason);
       }
+    });
+
+    socket.on('agent-command-result', (payload: AgentCommandResultPayload) => {
+      const pending = pendingAgentCommands.get(payload.requestId);
+      if (!pending || pending.workerSocketId !== socket.id || pending.workspaceId !== workspaceId) {
+        return;
+      }
+      clearTimeout(pending.timeout);
+      pendingAgentCommands.delete(payload.requestId);
+      pending.resolve(payload);
     });
   }
 
@@ -799,6 +859,95 @@ io.on('connection', (socket) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/agent/workspace-status', async (req, res) => {
+  const decoded = await authenticateHttpUser(req, res);
+  if (!decoded) return;
+
+  const workspaceId = String(req.query.workspaceId || '');
+  if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, decoded.uid))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const worker = workersByWorkspace.get(workspaceId);
+  res.json({
+    workspaceId,
+    worker: worker
+      ? {
+        online: worker.socket.connected,
+        socketId: worker.socketId,
+        workspaceType: worker.workspaceType,
+        ownerId: worker.ownerId || null
+      }
+      : {
+        online: false,
+        socketId: null,
+        workspaceType: getWorkspaceTypeFromId(workspaceId),
+        ownerId: getPersonalWorkspaceOwnerId(workspaceId)
+      },
+    sessions: getWorkspaceSessions(workspaceId)
+  });
+});
+
+app.post('/agent/run-command', async (req, res) => {
+  const decoded = await authenticateHttpUser(req, res);
+  if (!decoded) return;
+
+  const workspaceId = String(req.body?.workspaceId || '');
+  const command = String(req.body?.command || '');
+  const cwd = String(req.body?.cwd || '.');
+  const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs || 15000), 1000), 25000);
+  const maxOutputBytes = Math.min(Math.max(Number(req.body?.maxOutputBytes || 12000), 1000), 20000);
+
+  if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, decoded.uid))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  if (!command.trim()) {
+    return res.status(400).json({ error: 'command required' });
+  }
+
+  const worker = workersByWorkspace.get(workspaceId);
+  if (!worker || !worker.socket.connected) {
+    return res.status(409).json({ error: 'No hay worker conectado para este workspace' });
+  }
+
+  const requestId = `agent_${workspaceId.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+  try {
+    const result = await new Promise<AgentCommandResultPayload>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingAgentCommands.delete(requestId);
+        reject(new Error('Timeout esperando resultado del worker'));
+      }, timeoutMs + 5000);
+
+      pendingAgentCommands.set(requestId, {
+        workspaceId,
+        workerSocketId: worker.socketId,
+        resolve,
+        reject,
+        timeout
+      });
+
+      io.to(worker.socketId).emit('agent-command', {
+        requestId,
+        workspaceId,
+        command,
+        cwd,
+        timeoutMs,
+        maxOutputBytes
+      });
+    });
+
+    res.json(result);
+  } catch (error) {
+    const pending = pendingAgentCommands.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pendingAgentCommands.delete(requestId);
+    }
+    res.status(504).json({ error: error instanceof Error ? error.message : 'Worker command failed' });
+  }
 });
 
 // Protected status endpoint (basic auth or admin token)
