@@ -1,0 +1,521 @@
+import * as admin from 'firebase-admin';
+import { Server, Socket } from 'socket.io';
+import { getWorkspaceTypeFromId } from './lib/workerToken';
+import {
+  workersByWorkspace,
+  sessions,
+  sessionsByWorker,
+  MAX_HISTORY_BUFFER,
+  type AgentCommandResultPayload
+} from './state';
+import {
+  canUserAccessWorkspace,
+  canUserAccessSession,
+  verifyWorkerToken
+} from './auth';
+import {
+  endSession,
+  endSessionsByWorker,
+  notifyWorkspaceStatus,
+  notifyWorkspaceSessions
+} from './sessions';
+import {
+  rejectPendingAgentCommandsForWorker,
+  resolvePendingAgentCommandResult
+} from './agentCommands';
+import { recordWorkerHeartbeat } from './workers';
+
+/** Register socket.io middleware for authentication. */
+export function registerAuthMiddleware(io: Server) {
+  io.use(async (socket, next) => {
+    const { type, token, workerToken } = socket.handshake.auth;
+
+    try {
+      if (type === 'client') {
+        if (!token) return next(new Error('Missing client token'));
+
+        try {
+          const decodedToken = await admin.auth().verifyIdToken(token);
+          socket.data.uid = decodedToken.uid;
+          console.log(`✅ Client authenticated: ${decodedToken.uid}`);
+
+          if (socket.handshake.auth.sessionId) {
+            socket.data.requestedSessionId = socket.handshake.auth.sessionId;
+          }
+
+        } catch (e) {
+          console.error('Token verification failed:', e);
+          return next(new Error('Authentication failed'));
+        }
+
+        socket.data.role = 'client';
+        return next();
+      }
+
+      if (type === 'worker') {
+        if (!workerToken) return next(new Error('Missing worker token'));
+
+        const payload = verifyWorkerToken(workerToken);
+        if (!payload) {
+          console.warn(`⚠️ Invalid worker token signature`);
+          return next(new Error('Unauthorized: Invalid token'));
+        }
+
+        const { workspaceId, workspaceType, ownerId } = payload;
+        socket.data.workspaceId = workspaceId;
+        socket.data.workspaceType = workspaceType;
+        socket.data.ownerId = ownerId;
+        socket.data.role = 'worker';
+
+        return next();
+      }
+
+      if (type === 'sync-agent') {
+        if (!workerToken) return next(new Error('Missing worker token for sync-agent'));
+
+        const payload = verifyWorkerToken(workerToken);
+
+        if (!payload) {
+          console.warn(`⚠️ Blocked unauthorized sync-agent connection (Invalid Token)`);
+          return next(new Error('Unauthorized: Invalid token'));
+        }
+
+        const { workspaceId, workspaceType, ownerId } = payload;
+        socket.data.workspaceId = workspaceId;
+        socket.data.workspaceType = workspaceType;
+        socket.data.ownerId = ownerId;
+        socket.data.role = 'sync-agent';
+
+        return next();
+      }
+
+      return next(new Error('Unknown connection type'));
+    } catch (e) {
+      console.error('Connection error:', e);
+      return next(new Error('Internal Server Error'));
+    }
+  });
+}
+
+/** Register all socket.io connection handlers (worker, sync-agent, client). */
+export function registerConnectionHandlers(io: Server) {
+  io.on('connection', (socket) => {
+    const role = socket.data.role;
+
+    if (role === 'worker') {
+      handleWorkerConnection(io, socket);
+    }
+
+    if (role === 'sync-agent') {
+      handleSyncAgentConnection(io, socket);
+    }
+
+    if (role === 'client') {
+      handleClientConnection(io, socket);
+    }
+  });
+}
+
+// ── Worker handler ───────────────────────────────────────────────
+
+function handleWorkerConnection(io: Server, socket: Socket) {
+  const workspaceId = socket.data.workspaceId;
+  const workspaceType = socket.data.workspaceType;
+  const ownerId = socket.data.ownerId;
+
+  const existing = workersByWorkspace.get(workspaceId);
+  if (existing) {
+    if (existing.socket.connected) {
+      console.log(`⚠️ Worker already connected for workspace ${workspaceId}, rejecting duplicate`);
+      socket.emit('error', { message: 'Worker already connected for this workspace' });
+      socket.disconnect(true);
+      return;
+    }
+    console.log(`🔄 Cleaning up stale worker for workspace ${workspaceId}`);
+    endSessionsByWorker(io, existing.socketId, 'worker-replaced');
+  }
+
+  workersByWorkspace.set(workspaceId, {
+    socketId: socket.id,
+    socket,
+    workspaceType,
+    ownerId,
+    connectedAt: Date.now(),
+    lastHeartbeatAt: Date.now()
+  });
+
+  console.log(`✅ Worker registered for Workspace: ${workspaceId} [Type: ${workspaceType}]`);
+
+  notifyWorkspaceStatus(io, workspaceId, 'online');
+
+  socket.on('disconnect', () => {
+    const current = workersByWorkspace.get(workspaceId);
+    if (current?.socketId === socket.id) {
+      workersByWorkspace.delete(workspaceId);
+      endSessionsByWorker(io, socket.id, 'worker-disconnected');
+      rejectPendingAgentCommandsForWorker(socket.id, 'Worker disconnected before command result');
+      notifyWorkspaceStatus(io, workspaceId, 'offline');
+      console.log(`❌ Worker disconnected for Workspace: ${workspaceId}`);
+    }
+  });
+
+  socket.on('worker-heartbeat', (payload: unknown) => {
+    recordWorkerHeartbeat(workspaceId, payload);
+  });
+
+  socket.on('output', (payload: { sessionId: string; output?: string; data?: string }) => {
+    const session = sessions.get(payload.sessionId);
+    if (!session || session.workerSocketId !== socket.id) return;
+
+    const data = payload.output || payload.data || '';
+
+    // Buffer output for history replay (ring buffer to avoid GC pressure)
+    session.outputChunks.push(data);
+    session.outputSize += data.length;
+    while (session.outputSize > MAX_HISTORY_BUFFER) {
+      const removed = session.outputChunks.shift()!;
+      session.outputSize -= removed.length;
+    }
+
+    io.to(payload.sessionId).emit('output', {
+      sessionId: payload.sessionId,
+      data
+    });
+  });
+
+  socket.on('session-ended', (payload: { sessionId: string; reason: string }) => {
+    const session = sessions.get(payload.sessionId);
+    if (session && session.workerSocketId === socket.id) {
+      endSession(io, payload.sessionId, payload.reason);
+    }
+  });
+
+  socket.on('agent-command-result', (payload: AgentCommandResultPayload) => {
+    resolvePendingAgentCommandResult(payload, socket.id, workspaceId);
+  });
+}
+
+// ── Sync-agent handler ───────────────────────────────────────────
+
+function handleSyncAgentConnection(io: Server, socket: Socket) {
+  const workspaceId = socket.data.workspaceId;
+  const workspaceType = socket.data.workspaceType;
+  const ownerId = socket.data.ownerId;
+  console.log(`📁 Sync-Agent connected for Workspace: ${workspaceId} (Socket: ${socket.id})`);
+
+  // Helper: mint and send a Firebase custom token to the sync-agent
+  const mintAndSendToken = async () => {
+    try {
+      let uidToMint = '';
+      let additionalClaims = {};
+
+      if (workspaceType === 'personal' && ownerId) {
+        uidToMint = ownerId;
+        additionalClaims = { workspaceId, role: 'sync-agent' };
+      } else {
+        uidToMint = `sync-agent:${workspaceId}`;
+        additionalClaims = { workspaceId, role: 'sync-agent' };
+      }
+
+      const token = await admin.auth().createCustomToken(uidToMint, additionalClaims);
+      socket.emit('firebase-custom-token', { token });
+      console.log(`🔑 Sent custom token to sync-agent for ${uidToMint}`);
+    } catch (e) {
+      console.error('Error minting token for sync-agent:', e);
+    }
+  };
+
+  void mintAndSendToken();
+
+  socket.on('request-firebase-token', () => {
+    console.log(`🔑 Sync-Agent requesting token refresh for ${workspaceId}`);
+    void mintAndSendToken();
+  });
+
+  socket.on('doc-change', (payload: {
+    workspaceId: string;
+    docId: string;
+    action: 'created' | 'updated' | 'deleted';
+    data?: { name?: string; parentId?: string | null };
+  }) => {
+    const roomName = `workspace:${payload.workspaceId}`;
+    console.log(`[Hub] doc-change: ${payload.action} ${payload.docId} in ${payload.workspaceId}`);
+    io.to(roomName).emit('doc-change', payload);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`📁 Sync-Agent disconnected for Workspace: ${workspaceId}`);
+  });
+}
+
+// ── Client handler ───────────────────────────────────────────────
+
+function handleClientConnection(io: Server, socket: Socket) {
+  const uid = socket.data.uid;
+  console.log(`👤 Client connected: ${uid} (Socket: ${socket.id})`);
+
+  if (socket.data.requestedSessionId) {
+    void (async () => {
+      const session = sessions.get(socket.data.requestedSessionId);
+      if (!session) return;
+
+      const allowed = await canUserAccessSession(session, uid);
+      if (!allowed) return;
+
+      console.log(`🔄 Restoring session ${socket.data.requestedSessionId} for user ${uid}`);
+      await socket.join(socket.data.requestedSessionId);
+
+      socket.emit('session-created', {
+        id: socket.data.requestedSessionId,
+        workspaceId: session.workspaceId,
+        workspaceName: session.workspaceName,
+        workspaceType: session.workspaceType,
+        sessionName: session.sessionName
+      });
+    })();
+  }
+
+  socket.on('workspace:subscribe', async (data: { workspaceId: string }) => {
+    const { workspaceId } = data;
+    if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+      socket.emit('error', { message: 'No autorizado para este espacio', workspaceId });
+      return;
+    }
+
+    const roomName = `workspace:${workspaceId}`;
+
+    await socket.join(roomName);
+    console.log(`[Hub] Client ${uid} subscribed to ${roomName}`);
+
+    const worker = workersByWorkspace.get(workspaceId);
+    socket.emit('worker-status', {
+      status: worker ? 'online' : 'offline',
+      workspaceId
+    });
+
+    const activeSessions = Array.from(sessions.entries())
+      .filter(([, s]) => s.workspaceId === workspaceId)
+      .map(([id, s]) => ({
+        id,
+        workspaceId: s.workspaceId,
+        workspaceName: s.workspaceName,
+        workspaceType: s.workspaceType,
+        ownerUid: s.ownerUid,
+        sessionName: s.sessionName
+      }));
+    socket.emit('workspace-sessions', {
+      workspaceId,
+      sessions: activeSessions
+    });
+  });
+
+  socket.on('workspace:unsubscribe', async (data: { workspaceId: string }) => {
+    const { workspaceId } = data;
+    const roomName = `workspace:${workspaceId}`;
+    await socket.leave(roomName);
+    console.log(`[Hub] Client ${uid} unsubscribed from ${roomName}`);
+  });
+
+  socket.on('workspace:check-worker', async (data: { workspaceId: string }) => {
+    const { workspaceId } = data;
+    if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+      socket.emit('error', { message: 'No autorizado para este espacio', workspaceId });
+      return;
+    }
+
+    const worker = workersByWorkspace.get(workspaceId);
+    socket.emit('worker-status', {
+      status: worker ? 'online' : 'offline',
+      workspaceId
+    });
+  });
+
+  socket.on('restore-session', async (payload: { sessionId?: string }) => {
+    const sessionId = payload?.sessionId;
+    if (!sessionId) return;
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      socket.emit('restore-failed', { sessionId, reason: 'session-not-found' });
+      return;
+    }
+
+    const allowed = await canUserAccessSession(session, uid);
+    if (!allowed) {
+      socket.emit('restore-failed', { sessionId, reason: 'unauthorized' });
+      return;
+    }
+
+    await socket.join(sessionId);
+    socket.emit('session-created', {
+      id: sessionId,
+      workspaceId: session.workspaceId,
+      workspaceName: session.workspaceName,
+      workspaceType: session.workspaceType,
+      sessionName: session.sessionName
+    });
+
+    if (session.outputChunks.length > 0) {
+      socket.emit('output', {
+        sessionId,
+        data: session.outputChunks.join('')
+      });
+    }
+  });
+
+  socket.on('join-session', async (payload: { sessionId: string }) => {
+    const { sessionId } = payload;
+    if (!sessionId) return;
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      socket.emit('join-session-failed', { sessionId, reason: 'session-not-found' });
+      return;
+    }
+
+    const isOwner = session.ownerUid === uid;
+    const allowed = await canUserAccessSession(session, uid);
+    if (!allowed) {
+      socket.emit('join-session-failed', { sessionId, reason: 'unauthorized' });
+      return;
+    }
+
+    await socket.join(sessionId);
+    console.log(`[Hub] Client ${uid} joined session ${sessionId} (owner: ${isOwner})`);
+
+    socket.emit('session-joined', {
+      id: sessionId,
+      workspaceId: session.workspaceId,
+      workspaceName: session.workspaceName,
+      workspaceType: session.workspaceType,
+      sessionName: session.sessionName,
+      isOwner
+    });
+
+    if (session.outputChunks.length > 0) {
+      socket.emit('output', {
+        sessionId,
+        data: session.outputChunks.join('')
+      });
+    }
+  });
+
+  socket.on('create-session', async (payload: { workspaceId: string; workspaceName?: string; workspaceType?: 'personal' | 'shared'; sessionName?: string }) => {
+    const { workspaceId, workspaceName, sessionName } = payload;
+
+    console.log(`[Hub] create-session request from ${uid} for workspace ${workspaceId}`);
+
+    if (!workspaceId || !(await canUserAccessWorkspace(workspaceId, uid))) {
+      return socket.emit('error', {
+        message: 'No autorizado para este espacio de trabajo',
+        workspaceId
+      });
+    }
+
+    const worker = workersByWorkspace.get(workspaceId);
+
+    if (!worker) {
+      console.log(`[Hub] No worker found for workspace ${workspaceId}`);
+      return socket.emit('error', {
+        message: `No hay worker conectado para este espacio de trabajo`,
+        workspaceId
+      });
+    }
+
+    const sessionId = `sess_${workspaceId.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`;
+
+    sessions.set(sessionId, {
+      ownerUid: uid,
+      workerSocketId: worker.socketId,
+      workspaceId,
+      workspaceName,
+      workspaceType: getWorkspaceTypeFromId(workspaceId),
+      sessionName: sessionName || undefined,
+      outputChunks: [],
+      outputSize: 0
+    });
+    // Maintain reverse index
+    const workerSessions = sessionsByWorker.get(worker.socketId) ?? new Set<string>();
+    workerSessions.add(sessionId);
+    sessionsByWorker.set(worker.socketId, workerSessions);
+
+    await socket.join(sessionId);
+
+    io.to(worker.socketId).emit('session-created', {
+      id: sessionId,
+      workspaceId,
+      workspaceName,
+      workspaceType: getWorkspaceTypeFromId(workspaceId)
+    });
+
+    socket.emit('session-created', {
+      id: sessionId,
+      workspaceId,
+      sessionName: sessionName || undefined
+    });
+
+    notifyWorkspaceSessions(io, workspaceId);
+
+    console.log(`[Hub] Session created: ${sessionId} for workspace ${workspaceId}`);
+  });
+
+  socket.on('rename-session', async (payload: { sessionId: string; sessionName: string }) => {
+    const { sessionId, sessionName } = payload;
+    const session = sessions.get(sessionId);
+    if (!session) return;
+
+    const isOwner = session.ownerUid === uid;
+    const canCollaborate = session.workspaceType === 'shared'
+      && socket.rooms.has(sessionId)
+      && await canUserAccessSession(session, uid);
+    if (!isOwner && !canCollaborate) return;
+
+    session.sessionName = sessionName;
+    console.log(`[Hub] Session renamed: ${sessionId} -> "${sessionName}" by ${uid}`);
+
+    io.to(`workspace:${session.workspaceId}`).emit('session-renamed', {
+      sessionId,
+      sessionName
+    });
+  });
+
+  socket.on('execute', async (data: { sessionId: string; command: string }) => {
+    const session = sessions.get(data.sessionId);
+    if (!session) return;
+
+    const isOwner = session.ownerUid === uid;
+    const canCollaborate = session.workspaceType === 'shared'
+      && socket.rooms.has(data.sessionId)
+      && await canUserAccessSession(session, uid);
+    if (!isOwner && !canCollaborate) return;
+
+    io.to(session.workerSocketId).emit('execute', {
+      sessionId: data.sessionId,
+      command: data.command
+    });
+  });
+
+  socket.on('resize', (data: { sessionId: string; cols: number; rows: number }) => {
+    const session = sessions.get(data.sessionId);
+    if (!session) return;
+    if (session.ownerUid !== uid) return;
+
+    io.to(session.workerSocketId).emit('resize', {
+      sessionId: data.sessionId,
+      cols: data.cols,
+      rows: data.rows
+    });
+  });
+
+  socket.on('kill-session', (data: { sessionId: string }) => {
+    const session = sessions.get(data.sessionId);
+    if (!session || session.ownerUid !== uid) return;
+
+    io.to(session.workerSocketId).emit('kill-session', { sessionId: data.sessionId });
+    endSession(io, data.sessionId, 'user-terminated');
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`👤 Client disconnected: ${uid}`);
+  });
+}
