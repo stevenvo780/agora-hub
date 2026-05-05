@@ -1,6 +1,9 @@
 import * as admin from 'firebase-admin';
 import { Server, Socket } from 'socket.io';
 import { getWorkspaceTypeFromId } from './lib/workerToken';
+import { createSlidingWindowRateLimiter } from './lib/rateLimit';
+
+const executeRateLimiter = createSlidingWindowRateLimiter({ windowMs: 10_000, maxPerWindow: 20 });
 import {
   workersByWorkspace,
   sessions,
@@ -238,6 +241,10 @@ function handleSyncAgentConnection(io: Server, socket: Socket) {
     action: 'created' | 'updated' | 'deleted';
     data?: { name?: string; parentId?: string | null };
   }) => {
+    if (payload.workspaceId !== workspaceId) {
+      console.warn(`[Hub] doc-change rejected: payload.workspaceId=${payload.workspaceId} !== socket.workspaceId=${workspaceId}`);
+      return;
+    }
     const roomName = `workspace:${payload.workspaceId}`;
     console.log(`[Hub] doc-change: ${payload.action} ${payload.docId} in ${payload.workspaceId}`);
     io.to(roomName).emit('doc-change', payload);
@@ -461,6 +468,12 @@ function handleClientConnection(io: Server, socket: Socket) {
 
   socket.on('rename-session', async (payload: { sessionId: string; sessionName: string }) => {
     const { sessionId, sessionName } = payload;
+
+    if (typeof sessionName !== 'string' || sessionName.length > 200) {
+      console.warn(`[Hub] rename-session rejected: invalid sessionName from ${uid}`);
+      return;
+    }
+
     const session = sessions.get(sessionId);
     if (!session) return;
 
@@ -470,7 +483,7 @@ function handleClientConnection(io: Server, socket: Socket) {
       && await canUserAccessSession(session, uid);
     if (!isOwner && !canCollaborate) return;
 
-    session.sessionName = sessionName;
+    session.sessionName = sessionName.trim();
     console.log(`[Hub] Session renamed: ${sessionId} -> "${sessionName}" by ${uid}`);
 
     io.to(`workspace:${session.workspaceId}`).emit('session-renamed', {
@@ -482,6 +495,12 @@ function handleClientConnection(io: Server, socket: Socket) {
   socket.on('execute', async (data: { sessionId: string; command: string }) => {
     const session = sessions.get(data.sessionId);
     if (!session) return;
+
+    const rl = executeRateLimiter.check(session.workspaceId);
+    if (!rl.ok) {
+      console.warn(`[Hub] execute rate-limited for workspace ${session.workspaceId} (retryAfter ${rl.retryAfterMs}ms)`);
+      return;
+    }
 
     const isOwner = session.ownerUid === uid;
     const canCollaborate = session.workspaceType === 'shared'

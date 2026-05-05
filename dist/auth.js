@@ -50,6 +50,15 @@ if (!exports.WORKER_SECRET) {
 }
 // ── Workspace access cache ───────────────────────────────────────
 const workspaceAccessCache = new Map();
+const cacheEvictionInterval = setInterval(() => {
+    const nowMs = Date.now();
+    for (const [key, entry] of workspaceAccessCache) {
+        if (entry.expiresAt <= nowMs) {
+            workspaceAccessCache.delete(key);
+        }
+    }
+}, 60000);
+cacheEvictionInterval.unref();
 const canUserAccessWorkspace = async (workspaceId, uid) => {
     if (!workspaceId || !uid)
         return false;

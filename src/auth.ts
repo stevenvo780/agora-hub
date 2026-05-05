@@ -25,6 +25,16 @@ if (!WORKER_SECRET) {
 
 const workspaceAccessCache = new Map<string, { result: boolean; expiresAt: number }>();
 
+const cacheEvictionInterval = setInterval(() => {
+  const nowMs = Date.now();
+  for (const [key, entry] of workspaceAccessCache) {
+    if (entry.expiresAt <= nowMs) {
+      workspaceAccessCache.delete(key);
+    }
+  }
+}, 60_000);
+cacheEvictionInterval.unref();
+
 export const canUserAccessWorkspace = async (workspaceId: string, uid: string): Promise<boolean> => {
   if (!workspaceId || !uid) return false;
   if (isPersonalWorkspaceToken(workspaceId)) {

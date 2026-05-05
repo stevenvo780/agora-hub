@@ -3,6 +3,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createSlidingWindowRateLimiter = createSlidingWindowRateLimiter;
 function createSlidingWindowRateLimiter({ windowMs, maxPerWindow }) {
     const history = new Map();
+    const evictionInterval = setInterval(() => {
+        const nowMs = Date.now();
+        const cutoff = nowMs - windowMs * 2;
+        for (const [key, timestamps] of history) {
+            if (timestamps.length === 0 || timestamps[timestamps.length - 1] < cutoff) {
+                history.delete(key);
+            }
+        }
+    }, 60000);
+    evictionInterval.unref();
     return {
         check(key, nowMs = Date.now()) {
             const previous = history.get(key) ?? [];

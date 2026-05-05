@@ -9,6 +9,13 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+process.on('uncaughtException', (err) => {
+  console.error('[hub] uncaughtException', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[hub] unhandledRejection', reason);
+});
+
 // ── Firebase Admin init ──────────────────────────────────────────
 
 type ServiceAccountWithProjectId = admin.ServiceAccount & { project_id?: string };

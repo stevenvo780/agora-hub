@@ -45,6 +45,12 @@ const cors_1 = __importDefault(require("cors"));
 const admin = __importStar(require("firebase-admin"));
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
+process.on('uncaughtException', (err) => {
+    console.error('[hub] uncaughtException', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[hub] unhandledRejection', reason);
+});
 if (!admin.apps.length) {
     try {
         let serviceAccount = null;
