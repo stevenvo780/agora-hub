@@ -45,11 +45,20 @@ export const canUserAccessWorkspace = async (workspaceId: string, uid: string): 
   const cached = workspaceAccessCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.result;
 
-  const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
-  const result = snap.exists && Array.isArray((snap.data() as { members?: unknown } | undefined)?.members)
-    && (snap.data() as { members: unknown[] }).members.includes(uid);
-  workspaceAccessCache.set(cacheKey, { result, expiresAt: Date.now() + WORKSPACE_ACCESS_CACHE_TTL });
-  return result;
+  try {
+    const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
+    const result = snap.exists && Array.isArray((snap.data() as { members?: unknown } | undefined)?.members)
+      && (snap.data() as { members: unknown[] }).members.includes(uid);
+    workspaceAccessCache.set(cacheKey, { result, expiresAt: Date.now() + WORKSPACE_ACCESS_CACHE_TTL });
+    return result;
+  } catch (error) {
+    // Si Firestore RPC falla (credenciales rotas, red, etc.) no cacheamos el
+    // false: queremos reintentar en la próxima subscribe. Log explícito para
+    // diagnóstico — antes este throw quedaba silencioso porque el handler
+    // socket.on(async) descartaba la rejected promise sin trace.
+    console.error(`[auth] canUserAccessWorkspace(${workspaceId}, ${uid}) failed:`, error instanceof Error ? error.message : error);
+    return false;
+  }
 };
 
 export const clearWorkspaceAccessCacheForTesting = () => {
