@@ -441,7 +441,6 @@ function handleClientConnection(io: Server, socket: Socket) {
       outputChunks: [],
       outputSize: 0
     });
-    // Maintain reverse index
     const workerSessions = sessionsByWorker.get(worker.socketId) ?? new Set<string>();
     workerSessions.add(sessionId);
     sessionsByWorker.set(worker.socketId, workerSessions);

@@ -138,7 +138,6 @@ export function registerRoutes(app: express.Application, io: Server) {
     }
   });
 
-  // Protected status endpoint (admin only)
   app.get('/status', async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) {

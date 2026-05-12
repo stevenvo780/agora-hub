@@ -81,15 +81,15 @@ const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     if (!origin) return callback(null, true);
 
+    let allowed = false;
     try {
       const originUrl = new URL(origin);
-      if (CLIENT_ORIGINS.some(allowed => origin === allowed || allowed === originUrl.origin)) {
-        return callback(null, true);
-      }
-    } catch (e) {
-      // Invalid origin URL
+      allowed = CLIENT_ORIGINS.some(o => origin === o || o === originUrl.origin);
+    } catch (_e) {
+      allowed = false;
     }
 
+    if (allowed) return callback(null, true);
     console.warn(`⚠️ CORS blocked origin: ${origin}`);
     callback(new Error('Not allowed by CORS'));
   },
@@ -164,5 +164,4 @@ const resolvePort = () => {
 const PORT = resolvePort();
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Hub Service running on port ${PORT}`);
-  console.log(`📡 Architecture: Workers registered per Workspace`);
 });

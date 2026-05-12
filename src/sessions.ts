@@ -45,7 +45,6 @@ export const endSession = (io: Server, sessionId: string, reason: string) => {
   if (!session) return;
   const workspaceId = session.workspaceId;
   sessions.delete(sessionId);
-  // Maintain reverse index
   const workerSessions = sessionsByWorker.get(session.workerSocketId);
   if (workerSessions) {
     workerSessions.delete(sessionId);
