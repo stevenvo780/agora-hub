@@ -38,7 +38,6 @@ const endSession = (io, sessionId, reason) => {
         return;
     const workspaceId = session.workspaceId;
     state_1.sessions.delete(sessionId);
-    // Maintain reverse index
     const workerSessions = state_1.sessionsByWorker.get(session.workerSocketId);
     if (workerSessions) {
         workerSessions.delete(sessionId);

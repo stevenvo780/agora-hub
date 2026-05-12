@@ -145,7 +145,6 @@ function registerRoutes(app, io) {
             res.status(504).json({ error: error instanceof Error ? error.message : 'Worker command failed' });
         }
     });
-    // Protected status endpoint (admin only)
     app.get('/status', async (req, res) => {
         const authHeader = req.headers.authorization;
         if (!authHeader) {

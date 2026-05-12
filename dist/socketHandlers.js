@@ -390,7 +390,6 @@ function handleClientConnection(io, socket) {
             outputChunks: [],
             outputSize: 0
         });
-        // Maintain reverse index
         const workerSessions = state_1.sessionsByWorker.get(worker.socketId) ?? new Set();
         workerSessions.add(sessionId);
         state_1.sessionsByWorker.set(worker.socketId, workerSessions);
