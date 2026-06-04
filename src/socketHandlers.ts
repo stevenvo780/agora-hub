@@ -3,11 +3,16 @@ import { Server, Socket } from 'socket.io';
 import { getWorkspaceTypeFromId } from './lib/workerToken';
 import { createSlidingWindowRateLimiter } from './lib/rateLimit';
 
-const executeRateLimiter = createSlidingWindowRateLimiter({ windowMs: 10_000, maxPerWindow: 20 });
+// 'execute' transporta entrada del PTY (cada tecla = 1 evento). 20/10s descartaba
+// pulsaciones al tipear rápido o pegar (se sentía como latencia/teclas perdidas).
+// 1000/10s deja tipear y pegar sin dropear, manteniendo un tope anti-abuso.
+const executeRateLimiter = createSlidingWindowRateLimiter({ windowMs: 10_000, maxPerWindow: 1000 });
 import {
   workersByWorkspace,
   sessions,
   sessionsByWorker,
+  workerDisconnectGrace,
+  WORKER_DISCONNECT_GRACE_MS,
   MAX_HISTORY_BUFFER,
   type AgentCommandResultPayload
 } from './state';
@@ -19,6 +24,7 @@ import {
 import {
   endSession,
   endSessionsByWorker,
+  reattachSessions,
   notifyWorkspaceStatus,
   notifyWorkspaceSessions
 } from './sessions';
@@ -134,8 +140,13 @@ function handleWorkerConnection(io: Server, socket: Socket) {
       socket.disconnect(true);
       return;
     }
-    console.log(`🔄 Cleaning up stale worker for workspace ${workspaceId}`);
-    endSessionsByWorker(io, existing.socketId, 'worker-replaced');
+    // El worker volvió tras un corte: cancelar la gracia y RE-ATTACHEAR sus sesiones
+    // al nuevo socketId (sus PTYs siguen vivos) en lugar de matarlas. Así un agente
+    // largo en la terminal sobrevive a un parpadeo de red.
+    const grace = workerDisconnectGrace.get(workspaceId);
+    if (grace) { clearTimeout(grace); workerDisconnectGrace.delete(workspaceId); }
+    const reattached = reattachSessions(io, existing.socketId, socket.id);
+    console.log(`🔁 Worker reconnected for workspace ${workspaceId}, re-attached ${reattached} session(s)`);
   }
 
   workersByWorkspace.set(workspaceId, {
@@ -154,11 +165,24 @@ function handleWorkerConnection(io: Server, socket: Socket) {
   socket.on('disconnect', () => {
     const current = workersByWorkspace.get(workspaceId);
     if (current?.socketId === socket.id) {
-      workersByWorkspace.delete(workspaceId);
-      endSessionsByWorker(io, socket.id, 'worker-disconnected');
+      // NO terminar las sesiones de inmediato: el PTY sigue vivo en el worker.
+      // Damos gracia para que reconecte y re-attachee (ver bloque `existing` arriba).
+      // Los comandos del agente IA pendientes sí se rechazan ya (no son reanudables).
       rejectPendingAgentCommandsForWorker(socket.id, 'Worker disconnected before command result');
       notifyWorkspaceStatus(io, workspaceId, 'offline');
-      console.log(`❌ Worker disconnected for Workspace: ${workspaceId}`);
+      const prev = workerDisconnectGrace.get(workspaceId);
+      if (prev) clearTimeout(prev);
+      const graceTimer = setTimeout(() => {
+        workerDisconnectGrace.delete(workspaceId);
+        const stillSame = workersByWorkspace.get(workspaceId);
+        if (!stillSame || stillSame.socketId === socket.id) {
+          workersByWorkspace.delete(workspaceId);
+          endSessionsByWorker(io, socket.id, 'worker-disconnected');
+          console.log(`❌ Worker grace expired — sessions ended for Workspace: ${workspaceId}`);
+        }
+      }, WORKER_DISCONNECT_GRACE_MS);
+      workerDisconnectGrace.set(workspaceId, graceTimer);
+      console.log(`⏳ Worker disconnected for Workspace: ${workspaceId} — ${WORKER_DISCONNECT_GRACE_MS}ms de gracia antes de terminar sesiones`);
     }
   });
 

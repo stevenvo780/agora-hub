@@ -64,7 +64,13 @@ export const pendingAgentCommands = new Map<string, {
 
 export const pendingStatusNotifications = new Map<string, NodeJS.Timeout>();
 
+/** workspaceId → timer de gracia. Al caerse un worker NO terminamos sus sesiones
+ *  de inmediato: su PTY sigue vivo. Damos una ventana para que reconecte y
+ *  re-attachee (tipo tmux); sólo si la gracia expira se terminan las sesiones. */
+export const workerDisconnectGrace = new Map<string, NodeJS.Timeout>();
+
 // ── Constants ────────────────────────────────────────────────────
 
 export const STATUS_DEBOUNCE_MS = 2000;
+export const WORKER_DISCONNECT_GRACE_MS = 120_000; // gracia para reconexión de worker antes de terminar sesiones
 export const MAX_HISTORY_BUFFER = 500_000; // 500KB buffer per session

@@ -63,6 +63,27 @@ export const endSessionsByWorker = (io: Server, workerSocketId: string, reason: 
   }
 };
 
+/**
+ * Re-vincula las sesiones de un worker que reconectó tras un corte de red.
+ * Los PTYs siguen vivos en el worker (no se matan al desconectarse), así que sólo
+ * hay que re-apuntar el ruteo del viejo socketId al nuevo. Evita que un parpadeo
+ * de red mate un agente largo corriendo en la terminal.
+ */
+export const reattachSessions = (io: Server, oldSocketId: string, newSocketId: string) => {
+  const workerSessions = sessionsByWorker.get(oldSocketId);
+  if (!workerSessions || workerSessions.size === 0) return 0;
+  for (const sessionId of workerSessions) {
+    const session = sessions.get(sessionId);
+    if (session) {
+      session.workerSocketId = newSocketId;
+      io.to(sessionId).emit('output', { sessionId, data: '\r\n\x1b[32m[worker reconectado — sesión recuperada]\x1b[0m\r\n' });
+    }
+  }
+  sessionsByWorker.set(newSocketId, new Set(workerSessions));
+  sessionsByWorker.delete(oldSocketId);
+  return workerSessions.size;
+};
+
 /** Debounced worker status broadcast: immediate for 'online', delayed for 'offline'. */
 export const notifyWorkspaceStatus = (io: Server, workspaceId: string, status: 'online' | 'offline') => {
   const pending = pendingStatusNotifications.get(workspaceId);
