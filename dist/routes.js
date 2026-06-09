@@ -32,14 +32,26 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerRoutes = registerRoutes;
+const express_1 = __importDefault(require("express"));
 const workerToken_1 = require("./lib/workerToken");
 const rateLimit_1 = require("./lib/rateLimit");
 const state_1 = require("./state");
 const auth_1 = require("./auth");
 const sessions_1 = require("./sessions");
 const agentCommands_1 = require("./agentCommands");
+const gitCommit_1 = require("./lib/gitCommit");
+const crypto_1 = require("crypto");
+const HUB_INTERNAL_SECRET = (process.env.HUB_INTERNAL_SECRET || process.env.BACKEND_INTERNAL_SECRET || '').trim();
+const safeEq = (a, b) => {
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    return x.length === y.length && (0, crypto_1.timingSafeEqual)(x, y);
+};
 // ── Rate limiting ────────────────────────────────────────────────
 const AGENT_CMD_WINDOW_MS = 30000;
 const AGENT_CMD_MAX_PER_WINDOW = 8;
@@ -53,7 +65,28 @@ function checkAgentCommandRateLimit(workspaceId) {
 // ── Route registration ───────────────────────────────────────────
 function registerRoutes(app, io) {
     app.get('/health', (_req, res) => {
-        res.json({ status: 'ok', timestamp: new Date().toISOString() });
+        res.json({ status: 'ok', timestamp: new Date().toISOString(), gitCommit: (0, gitCommit_1.isGitCommitConfigured)() });
+    });
+    // Commit del workspace EN EL VPS: AgoraBack (Cloud Run, RAM limitada) manda la
+    // lista de archivos (metadata); el Hub lee los blobs de MinIO local + pushea a
+    // Forgejo local. Mueve el buffering del body grande fuera de Cloud Run (sin
+    // OOM, sin egress). Auth: HUB_INTERNAL_SECRET (server-to-server, no usuario).
+    app.post('/internal/git-commit', express_1.default.json({ limit: '80mb' }), async (req, res) => {
+        const provided = req.headers['x-hub-internal-secret']
+            || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        if (!HUB_INTERNAL_SECRET || !provided || !safeEq(provided, HUB_INTERNAL_SECRET)) {
+            return res.status(401).json({ ok: false, error: 'unauthorized' });
+        }
+        if (!(0, gitCommit_1.isGitCommitConfigured)()) {
+            return res.status(503).json({ ok: false, error: 'git-commit no configurado (faltan NAS_S3_*/FORGEJO_*)' });
+        }
+        try {
+            const result = await (0, gitCommit_1.hubGitCommit)(req.body);
+            return res.status(result.ok ? 200 : 502).json(result);
+        }
+        catch (e) {
+            return res.status(500).json({ ok: false, error: e.message });
+        }
     });
     app.get('/agent/workspace-status', async (req, res) => {
         const decoded = await (0, auth_1.authenticateHttpUser)(req, res);

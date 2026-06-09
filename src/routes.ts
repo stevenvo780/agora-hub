@@ -18,6 +18,14 @@ import {
 } from './auth';
 import { getWorkspaceSessions } from './sessions';
 import { makeAgentCommandRequestId } from './agentCommands';
+import { hubGitCommit, isGitCommitConfigured } from './lib/gitCommit';
+import { timingSafeEqual } from 'crypto';
+
+const HUB_INTERNAL_SECRET = (process.env.HUB_INTERNAL_SECRET || process.env.BACKEND_INTERNAL_SECRET || '').trim();
+const safeEq = (a: string, b: string): boolean => {
+  const x = Buffer.from(a); const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 
 // ── Rate limiting ────────────────────────────────────────────────
 
@@ -36,7 +44,28 @@ function checkAgentCommandRateLimit(workspaceId: string): { ok: boolean; retryAf
 
 export function registerRoutes(app: express.Application, io: Server) {
   app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), gitCommit: isGitCommitConfigured() });
+  });
+
+  // Commit del workspace EN EL VPS: AgoraBack (Cloud Run, RAM limitada) manda la
+  // lista de archivos (metadata); el Hub lee los blobs de MinIO local + pushea a
+  // Forgejo local. Mueve el buffering del body grande fuera de Cloud Run (sin
+  // OOM, sin egress). Auth: HUB_INTERNAL_SECRET (server-to-server, no usuario).
+  app.post('/internal/git-commit', express.json({ limit: '80mb' }), async (req, res) => {
+    const provided = (req.headers['x-hub-internal-secret'] as string)
+      || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!HUB_INTERNAL_SECRET || !provided || !safeEq(provided, HUB_INTERNAL_SECRET)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    if (!isGitCommitConfigured()) {
+      return res.status(503).json({ ok: false, error: 'git-commit no configurado (faltan NAS_S3_*/FORGEJO_*)' });
+    }
+    try {
+      const result = await hubGitCommit(req.body);
+      return res.status(result.ok ? 200 : 502).json(result);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: (e as Error).message });
+    }
   });
 
   app.get('/agent/workspace-status', async (req, res) => {

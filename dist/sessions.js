@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.notifyWorkspaceStatus = exports.endSessionsByWorker = exports.endSession = exports.notifyWorkspaceSessions = exports.getWorkspaceSessions = void 0;
+exports.notifyWorkspaceStatus = exports.reattachSessions = exports.endSessionsByWorker = exports.endSession = exports.notifyWorkspaceSessions = exports.getWorkspaceSessions = void 0;
 const state_1 = require("./state");
 /** List sessions for a workspace (for broadcasting to subscribers). */
 const getWorkspaceSessions = (workspaceId) => (Array.from(state_1.sessions.entries())
@@ -58,6 +58,28 @@ const endSessionsByWorker = (io, workerSocketId, reason) => {
     }
 };
 exports.endSessionsByWorker = endSessionsByWorker;
+/**
+ * Re-vincula las sesiones de un worker que reconectó tras un corte de red.
+ * Los PTYs siguen vivos en el worker (no se matan al desconectarse), así que sólo
+ * hay que re-apuntar el ruteo del viejo socketId al nuevo. Evita que un parpadeo
+ * de red mate un agente largo corriendo en la terminal.
+ */
+const reattachSessions = (io, oldSocketId, newSocketId) => {
+    const workerSessions = state_1.sessionsByWorker.get(oldSocketId);
+    if (!workerSessions || workerSessions.size === 0)
+        return 0;
+    for (const sessionId of workerSessions) {
+        const session = state_1.sessions.get(sessionId);
+        if (session) {
+            session.workerSocketId = newSocketId;
+            io.to(sessionId).emit('output', { sessionId, data: '\r\n\x1b[32m[worker reconectado — sesión recuperada]\x1b[0m\r\n' });
+        }
+    }
+    state_1.sessionsByWorker.set(newSocketId, new Set(workerSessions));
+    state_1.sessionsByWorker.delete(oldSocketId);
+    return workerSessions.size;
+};
+exports.reattachSessions = reattachSessions;
 /** Debounced worker status broadcast: immediate for 'online', delayed for 'offline'. */
 const notifyWorkspaceStatus = (io, workspaceId, status) => {
     const pending = state_1.pendingStatusNotifications.get(workspaceId);
