@@ -1,5 +1,6 @@
 import * as admin from 'firebase-admin';
 import express from 'express';
+import { readNativeDocument } from './native-store';
 import {
   isPersonalWorkspaceToken,
   getPersonalWorkspaceOwnerId,
@@ -46,7 +47,7 @@ export const canUserAccessWorkspace = async (workspaceId: string, uid: string): 
   if (cached && cached.expiresAt > Date.now()) return cached.result;
 
   try {
-    const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
+    const snap = await readNativeDocument('workspaces', workspaceId);
     const result = snap.exists && Array.isArray((snap.data() as { members?: unknown } | undefined)?.members)
       && (snap.data() as { members: unknown[] }).members.includes(uid);
     workspaceAccessCache.set(cacheKey, { result, expiresAt: Date.now() + WORKSPACE_ACCESS_CACHE_TTL });
@@ -80,7 +81,7 @@ export const canUserAccessSession = async (session: SessionData, uid: string): P
 
 export const isAdminUser = async (uid: string): Promise<boolean> => {
   if (!uid) return false;
-  const snap = await admin.firestore().collection('users').doc(uid).get();
+  const snap = await readNativeDocument('users', uid);
   if (!snap.exists) return false;
   const data = snap.data() as { role?: unknown } | undefined;
   return typeof data?.role === 'string' && ['admin', 'superadmin'].includes(data.role.toLowerCase());
