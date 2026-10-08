@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.authenticateHttpUser = exports.isAdminUser = exports.canUserAccessSession = exports.workspaceAccessCacheSizeForTesting = exports.clearWorkspaceAccessCacheForTesting = exports.canUserAccessWorkspace = exports.WORKER_TOKEN_MAX_AGE_MS = exports.ALLOW_LEGACY_WORKER_TOKENS = exports.WORKER_SECRET_PREVIOUS = exports.WORKER_SECRET = void 0;
 exports.verifyWorkerToken = verifyWorkerToken;
 const admin = __importStar(require("firebase-admin"));
+const native_store_1 = require("./native-store");
 const workerToken_1 = require("./lib/workerToken");
 const workerSecrets_1 = require("./lib/workerSecrets");
 // ── Config ───────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ const canUserAccessWorkspace = async (workspaceId, uid) => {
     if (cached && cached.expiresAt > Date.now())
         return cached.result;
     try {
-        const snap = await admin.firestore().collection('workspaces').doc(workspaceId).get();
+        const snap = await (0, native_store_1.readNativeDocument)('workspaces', workspaceId);
         const result = snap.exists && Array.isArray(snap.data()?.members)
             && snap.data().members.includes(uid);
         workspaceAccessCache.set(cacheKey, { result, expiresAt: Date.now() + WORKSPACE_ACCESS_CACHE_TTL });
@@ -102,7 +103,7 @@ exports.canUserAccessSession = canUserAccessSession;
 const isAdminUser = async (uid) => {
     if (!uid)
         return false;
-    const snap = await admin.firestore().collection('users').doc(uid).get();
+    const snap = await (0, native_store_1.readNativeDocument)('users', uid);
     if (!snap.exists)
         return false;
     const data = snap.data();
